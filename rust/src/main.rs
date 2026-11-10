@@ -1,0 +1,1002 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod catalog;
+mod engine;
+mod pages;
+mod reg;
+mod startup;
+mod sys;
+mod theme;
+
+use catalog::{Catalog, Facts};
+use eframe::egui::{self, Align2, Color32, Pos2, Rect, RichText, Sense, Vec2};
+use egui_phosphor::regular as ic;
+use engine::{Line, Log};
+use serde_json::Value;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use theme::*;
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Page { Home, Scan, Tweaks, Debloat, Boost, Startup, Backup }
+
+const NAV: [(Page, &str, &str); 7] = [
+    (Page::Home, ic::HOUSE, "Inicio"),
+    (Page::Scan, ic::CPU, "Escáner"),
+    (Page::Tweaks, ic::ROCKET_LAUNCH, "Optimizaciones"),
+    (Page::Debloat, ic::TRASH, "Debloat"),
+    (Page::Boost, ic::GAUGE, "Boost-Up"),
+    (Page::Startup, ic::POWER, "Arranque"),
+    (Page::Backup, ic::CLOCK_COUNTER_CLOCKWISE, "Backups"),
+];
+
+/// Resultados que mandan los hilos de trabajo a la interfaz.
+pub enum Msg {
+    Scan(Result<Value, String>),
+    /// Estados de tweaks. `ps` = es la tanda de PowerShell (la lenta).
+    States { map: HashMap<String, bool>, ps: bool },
+    Toggled { id: String, on: bool, done: engine::Done, quiet: bool },
+    Boosted { id: String, ok: bool, out: String, err: String },
+    Restore(Result<Vec<(String, String)>, String>),
+    RestoreCreated(Result<(), String>),
+    Stats(sys::Stats, (u64, u64)),
+}
+
+/// Lo que el usuario pidió durante el dibujado; se ejecuta al terminar el frame.
+#[derive(Clone)]
+pub enum Action {
+    Go(Page, Option<&'static str>),
+    Toggle(String),
+    ToggleNow(String),
+    Many(Vec<String>, &'static str),
+    ManyNow(Vec<String>),
+    RunBoost(String),
+    RunBoostNow(String),
+    Reboot,
+    RebootNow,
+    Rescan,
+    CreateRestore,
+    OpenRestore,
+    RevertAll,
+    /// Enciende o apaga el programa de arranque que está en esa posición de la lista.
+    Startup(usize),
+    RescanStartup,
+}
+
+pub struct Confirm { pub text: String, pub action: Action }
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+#[serde(default)]
+struct Saved {
+    /// Tweaks activados desde la app (para "Revertir todo" de los que no dejan respaldo).
+    applied: HashSet<String>,
+    /// Última vez que se corrió cada boost (segundos Unix).
+    boost_last: HashMap<String, u64>,
+    console_open: bool,
+    /// Último escaneo y estados conocidos: se muestran al abrir mientras se actualizan de fondo.
+    spec: Option<Value>,
+    state: HashMap<String, bool>,
+    /// Posición y tamaño de la ventana [x, y, ancho, alto] para abrirla donde quedó.
+    win: Option<[f32; 4]>,
+    maximized: bool,
+}
+
+const SIDE_W: f32 = 196.0;
+
+pub struct App {
+    pub cat: Arc<Catalog>,
+    pub page: Page,
+    pub tab: String,
+    pub query: String,
+    pub admin: bool,
+    pub spec: Option<Value>,
+    pub scan_err: Option<String>,
+    pub facts: Facts,
+    pub state: HashMap<String, bool>,
+    /// Ya llegó la tanda lenta de estados (PowerShell).
+    pub ps_ready: bool,
+    pub busy: HashSet<String>,
+    /// Se aplicó o revirtió algo que necesita reiniciar la PC.
+    pub reboot_pending: bool,
+    pub actions: Vec<Action>,
+    pub confirm: Option<Confirm>,
+    /// Tweaks que el usuario destildó en la confirmación de un lote.
+    confirm_skip: HashSet<String>,
+    queue: VecDeque<String>,
+    bulk: Option<(usize, usize, bool)>, // (total, ok, alguno pide reinicio)
+    pub boost_sel: usize,
+    pub boost_out: HashMap<String, String>,
+    pub restore: Option<Result<Vec<(String, String)>, String>>,
+    pub backups: Vec<(String, std::time::SystemTime)>,
+    pub stats: sys::Stats,
+    cpu_prev: (u64, u64),
+    stats_at: Option<Instant>,
+    stats_pending: bool,
+    saved: Saved,
+    lines: Vec<Line>,
+    running: u32,
+    run_start: Instant,
+    toasts: Vec<(String, Color32, Instant, f32)>,
+    tx: Sender<Msg>,
+    rx: Receiver<Msg>,
+    log_tx: Sender<Line>,
+    log_rx: Receiver<Line>,
+    pub logo: egui::TextureHandle,
+    /// Imagen propia elegida por el usuario; si no hay, se usa el logo.
+    pub avatar: Option<egui::TextureHandle>,
+    /// Programas que arrancan con Windows (se lee al entrar a la sección).
+    pub startup: Vec<startup::Item>,
+    frames: u32,
+    /// Cuándo se cambió de página (para el fundido de entrada).
+    page_at: Instant,
+    /// Ctrl+F: enfocar el buscador cuando se dibuje.
+    pub focus_search: bool,
+}
+
+fn main() -> eframe::Result {
+    // Modo de prueba, solo lectura: imprime el estado de todos los tweaks como JSON y sale.
+    if std::env::args().any(|a| a == "--check") {
+        let cat = Catalog::load();
+        let t0 = Instant::now();
+        let mut all = engine::check_all_native(&cat);
+        let native_ms = t0.elapsed().as_millis();
+        all.extend(engine::check_all_ps(&cat));
+        eprintln!("nativos: {native_ms} ms · total: {} ms · admin: {}", t0.elapsed().as_millis(), engine::is_admin());
+        let sorted: std::collections::BTreeMap<_, _> = all.into_iter().collect();
+        println!("{}", serde_json::to_string(&sorted).unwrap());
+        return Ok(());
+    }
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).expect("icono");
+    let saved = load_saved();
+    let mut vp = egui::ViewportBuilder::default()
+        .with_title("Botox Optimizer")
+        .with_inner_size([1340.0, 860.0])
+        .with_min_inner_size([1180.0, 720.0])
+        .with_icon(icon)
+        .with_maximized(saved.maximized);
+    // Abre donde quedó la última vez (si no estaba minimizada fuera de pantalla).
+    if let Some([x, y, w, h]) = saved.win.filter(|w| w[0] > -2000.0 && w[1] > -2000.0) {
+        vp = vp.with_position([x, y]).with_inner_size([w, h]);
+    }
+    let opts = eframe::NativeOptions { viewport: vp, ..Default::default() };
+    eframe::run_native("Botox Optimizer", opts, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+}
+
+fn saved_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into())).join("BotoxOptimizer").join("state.json")
+}
+
+/// Imagen propia del usuario (reemplaza la del perro), ya recortada a 512×512.
+fn avatar_path() -> std::path::PathBuf { saved_path().with_file_name("avatar.png") }
+
+/// Recorta al centro a un cuadrado y lo lleva a 512 px: así cualquier imagen, chica o enorme, vertical u horizontal, llena el marco.
+fn square(img: image::DynamicImage) -> image::RgbaImage {
+    let (w, h) = (img.width(), img.height());
+    let m = w.min(h);
+    img.crop_imm((w - m) / 2, (h - m) / 2, m, m).resize_exact(512, 512, image::imageops::FilterType::Lanczos3).to_rgba8()
+}
+
+fn avatar_texture(ctx: &egui::Context, img: &image::RgbaImage) -> egui::TextureHandle {
+    ctx.load_texture("avatar", egui::ColorImage::from_rgba_unmultiplied([512, 512], img.as_raw()), egui::TextureOptions::LINEAR)
+}
+
+/// Abre una imagen mirando su contenido, no la extensión: muchas ".jpg" bajadas de internet son WebP o PNG.
+fn open_image(path: impl AsRef<std::path::Path>) -> Result<image::DynamicImage, String> {
+    image::ImageReader::open(path).and_then(|r| r.with_guessed_format()).map_err(|e| e.to_string())?.decode().map_err(|e| e.to_string())
+}
+
+/// Imagen copiada en el portapapeles, o un archivo de imagen copiado en el Explorador.
+fn clipboard_image() -> Result<image::DynamicImage, String> {
+    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    if let Ok(i) = cb.get_image() {
+        return image::RgbaImage::from_raw(i.width as u32, i.height as u32, i.bytes.into_owned()).map(image::DynamicImage::ImageRgba8).ok_or_else(|| "imagen dañada".into());
+    }
+    let file = cb.get().file_list().ok().and_then(|l| l.into_iter().next()).ok_or("no hay nada copiado que sea una imagen.")?;
+    open_image(file)
+}
+
+fn load_saved() -> Saved { std::fs::read_to_string(saved_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default() }
+
+pub fn unix_now() -> u64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) }
+
+impl App {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        theme::install(&cc.egui_ctx);
+        // El logo se usa a ~130 px: se achica una vez con buen filtro para que no se vea dentado.
+        let img = image::load_from_memory(include_bytes!("../assets/logo.png")).expect("logo").to_rgba8();
+        let img = image::imageops::resize(&img, 264, 264, image::imageops::FilterType::Lanczos3);
+        let logo = cc.egui_ctx.load_texture("logo", egui::ColorImage::from_rgba_unmultiplied([264, 264], img.as_raw()), egui::TextureOptions::LINEAR);
+        let (tx, rx) = channel();
+        let (log_tx, log_rx) = channel();
+        let saved = load_saved();
+        let mut app = Self {
+            cat: Arc::new(Catalog::load()),
+            page: match std::env::var("BX_PAGE").as_deref() { Ok("scan") => Page::Scan, Ok("tweaks") => Page::Tweaks, Ok("debloat") => Page::Debloat, Ok("boost") => Page::Boost, Ok("backup") => Page::Backup, Ok("startup") => Page::Startup, _ => Page::Home },
+            startup: Vec::new(),
+            tab: std::env::var("BX_TAB").unwrap_or_else(|_| "all".into()),
+            query: String::new(),
+            admin: engine::is_admin(),
+            spec: None,
+            scan_err: None,
+            facts: Facts::default(),
+            state: HashMap::new(),
+            ps_ready: false,
+            busy: HashSet::new(),
+            reboot_pending: std::env::var("BX_REBOOT").is_ok(), // BX_REBOOT=1: muestra el aviso, para capturas
+            actions: vec![],
+            confirm: None,
+            confirm_skip: HashSet::new(),
+            queue: VecDeque::new(),
+            bulk: None,
+            boost_sel: 0,
+            boost_out: HashMap::new(),
+            restore: None,
+            backups: vec![],
+            stats: sys::Stats::default(),
+            cpu_prev: sys::cpu_times(),
+            stats_at: None,
+            stats_pending: false,
+            saved,
+            lines: vec![],
+            running: 0,
+            run_start: Instant::now(),
+            toasts: vec![],
+            tx,
+            rx,
+            log_tx,
+            log_rx,
+            logo,
+            avatar: open_image(avatar_path()).ok().map(|i| avatar_texture(&cc.egui_ctx, &square(i))),
+            frames: 0,
+            page_at: Instant::now(),
+            focus_search: false,
+        };
+        app.load_all();
+        // Arranque instantáneo: muestra lo último que se supo de la PC; los datos frescos llegan en segundos.
+        if let Some(spec) = app.saved.spec.clone() {
+            app.facts = sys::facts(&spec);
+            app.spec = Some(spec);
+            app.state = app.saved.state.clone();
+        }
+        if app.page == Page::Backup {
+            app.refresh_backups();
+        }
+        if app.page == Page::Startup {
+            app.startup = startup::scan();
+        }
+        app
+    }
+
+    /// Lanza un trabajo en otro hilo. Recibe el canal de resultados, el log de la consola y el catálogo.
+    fn spawn(&self, job: impl FnOnce(Sender<Msg>, Log, Arc<Catalog>) + Send + 'static) {
+        let (tx, log, cat) = (self.tx.clone(), Log(Some(self.log_tx.clone())), self.cat.clone());
+        std::thread::spawn(move || job(tx, log, cat));
+    }
+
+    fn load_all(&mut self) {
+        self.spec = None;
+        self.scan_err = None;
+        self.ps_ready = false;
+        self.spawn(|tx, _, cat| { let _ = tx.send(Msg::Scan(sys::scan(&cat))); });
+        self.spawn(|tx, _, cat| { let _ = tx.send(Msg::States { map: engine::check_all_native(&cat), ps: false }); });
+        self.spawn(|tx, _, cat| { let _ = tx.send(Msg::States { map: engine::check_all_ps(&cat), ps: true }); });
+    }
+
+    fn save(&self) {
+        if std::env::var("BX_SHOT").is_ok() {
+            return; // las capturas de prueba no tocan las preferencias del usuario
+        }
+        let p = saved_path();
+        let _ = std::fs::create_dir_all(p.parent().unwrap());
+        let _ = std::fs::write(p, serde_json::to_string(&self.saved).unwrap());
+    }
+
+    pub fn toast(&mut self, msg: impl Into<String>, color: Color32, secs: f32) { self.toasts.push((msg.into(), color, Instant::now(), secs)); }
+    pub fn on(&self, id: &str) -> bool { self.state.get(id).copied().unwrap_or(false) }
+    pub fn boost_last(&self, id: &str) -> Option<u64> { self.saved.boost_last.get(id).copied() }
+    pub fn applied(&self) -> &HashSet<String> { &self.saved.applied }
+    /// Los tweaks que se muestran: la categoría Notebook solo en notebooks.
+    pub fn visible(&self) -> Vec<&catalog::Tweak> { self.cat.tweaks.iter().filter(|t| t.cat != "laptop" || self.facts.laptop).collect() }
+
+    fn need_admin(&mut self) -> bool {
+        if !self.admin {
+            self.toast("Abrí Botox Optimizer como administrador para aplicar cambios.", RED, 5.0);
+        }
+        !self.admin
+    }
+
+    fn start_toggle(&mut self, id: String, quiet: bool) {
+        if self.busy.contains(&id) {
+            return;
+        }
+        let on = !self.on(&id);
+        self.busy.insert(id.clone());
+        self.spawn(move |tx, log, cat| {
+            let t = cat.tweak(&id).unwrap();
+            let done = engine::toggle(&cat, t, on, &log);
+            let _ = tx.send(Msg::Toggled { id, on, done, quiet });
+        });
+    }
+
+    fn act(&mut self, a: Action) {
+        match a {
+            Action::Go(page, tab) => {
+                if page != self.page {
+                    self.page_at = Instant::now();
+                }
+                self.page = page;
+                self.tab = tab.unwrap_or("all").into();
+                if page == Page::Backup {
+                    self.refresh_backups();
+                }
+                if page == Page::Startup {
+                    self.startup = startup::scan();
+                }
+            }
+            Action::RescanStartup => self.startup = startup::scan(),
+            Action::Startup(i) => {
+                let Some(item) = self.startup.get(i).cloned() else { return };
+                if self.need_admin() {
+                    return;
+                }
+                let on = !item.enabled;
+                let log = engine::Log(Some(self.log_tx.clone()));
+                match startup::set(&item, on) {
+                    Ok(()) => {
+                        self.startup[i].enabled = on;
+                        let msg = format!("{} {} al iniciar Windows", if on { "Encendido:" } else { "Apagado:" }, item.name);
+                        log.put("ok", msg.clone());
+                        self.toast(msg, if on { GREEN } else { ACCENT }, 3.5);
+                    }
+                    Err(e) => {
+                        log.put("err", format!("{}: {e}", item.name));
+                        self.toast(format!("{}: {e}", item.name), RED, 6.0);
+                    }
+                }
+            }
+            Action::Toggle(id) => {
+                if self.need_admin() {
+                    return;
+                }
+                let t = self.cat.tweak(&id).unwrap();
+                if !self.on(&id) && t.risk != "low" {
+                    self.confirm = Some(Confirm { text: format!("{}\n\nRiesgo medio: {}\n\n¿Aplicar?", t.name, t.desc), action: Action::ToggleNow(id) });
+                } else {
+                    self.start_toggle(id, false);
+                }
+            }
+            Action::ToggleNow(id) => self.start_toggle(id, false),
+            Action::Many(ids, verb) => {
+                if ids.is_empty() || self.need_admin() {
+                    return;
+                }
+                let text = format!("Se van a {verb} {} optimizaciones.\n\nConviene crear antes un punto de restauración (sección Backups).\n\n¿Continuar?", ids.len());
+                self.confirm = Some(Confirm { text, action: Action::ManyNow(ids) });
+            }
+            Action::ManyNow(ids) => {
+                self.bulk = Some((ids.len(), 0, false));
+                self.queue = ids.into();
+            }
+            // Limpiar shaders hace tironear las primeras partidas: se avisa antes.
+            Action::RunBoost(id) if id == "shaders" => {
+                if !self.need_admin() {
+                    let text = "Limpiar caché de shaders
+
+Los juegos van a recompilar sus shaders: las primeras 3 a 5 partidas pueden tironear y después se normaliza. Sirve después de actualizar el driver de video o si un juego se ve con errores gráficos.
+
+¿Continuar?";
+                    self.confirm = Some(Confirm { text: text.into(), action: Action::RunBoostNow(id) });
+                }
+            }
+            Action::Reboot => {
+                self.confirm = Some(Confirm { text: "Reiniciar la PC
+
+Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
+
+¿Continuar?".into(), action: Action::RebootNow });
+            }
+            Action::RebootNow => {
+                let _ = std::process::Command::new("shutdown.exe").args(["/r", "/t", "5"]).spawn();
+                self.toast("Reiniciando en 5 segundos…", ACCENT, 6.0);
+            }
+            Action::RunBoost(id) | Action::RunBoostNow(id) => {
+                if self.need_admin() || self.busy.contains(&format!("b:{id}")) {
+                    return;
+                }
+                self.busy.insert(format!("b:{id}"));
+                self.spawn(move |tx, log, cat| {
+                    let b = cat.boosts.iter().find(|b| b.id == id).unwrap();
+                    let (ok, out, err) = engine::boost(&cat, b, &log);
+                    let _ = tx.send(Msg::Boosted { id, ok, out, err });
+                });
+            }
+            Action::Rescan => self.load_all(),
+            Action::CreateRestore => {
+                if self.need_admin() || self.busy.contains("rp") {
+                    return;
+                }
+                self.busy.insert("rp".into());
+                self.toast("Creando punto de restauración… puede tardar un minuto.", ACCENT, 5.0);
+                self.spawn(|tx, log, cat| { let _ = tx.send(Msg::RestoreCreated(engine::create_restore_point(&cat, &log))); });
+            }
+            Action::OpenRestore => engine::open_system_restore(),
+            Action::RevertAll => {
+                let ids = self.reversible();
+                if ids.is_empty() {
+                    self.toast("No hay cambios para revertir.", ACCENT, 4.0);
+                } else if !self.need_admin() {
+                    let text = format!("Se van a revertir {} optimizaciones aplicadas por Botox Optimizer a sus valores originales.\n\n¿Continuar?", ids.len());
+                    self.confirm = Some(Confirm { text, action: Action::ManyNow(ids) });
+                }
+            }
+        }
+    }
+
+    /// Tweaks activos que la app puede revertir: tienen respaldo o se activaron desde acá.
+    pub fn reversible(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.backups.iter().map(|b| b.0.trim_end_matches("-nic").to_string()).chain(self.saved.applied.iter().cloned()).filter(|id| self.on(id) && self.cat.tweak(id).is_some()).collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    pub fn refresh_backups(&mut self) {
+        self.backups = engine::backups();
+        self.restore = None;
+        self.spawn(|tx, _, cat| { let _ = tx.send(Msg::Restore(engine::restore_points(&cat))); });
+    }
+
+    fn handle(&mut self, m: Msg) {
+        match m {
+            Msg::Scan(Ok(spec)) => {
+                self.facts = sys::facts(&spec);
+                self.saved.spec = Some(spec.clone());
+                self.spec = Some(spec);
+                self.save();
+            }
+            Msg::Scan(Err(e)) => self.scan_err = Some(e),
+            Msg::States { map, ps } => {
+                self.state.extend(map);
+                self.ps_ready |= ps;
+                if ps {
+                    self.saved.state = self.state.clone();
+                    self.save();
+                }
+            }
+            Msg::Toggled { id, on, done, quiet } => {
+                self.busy.remove(&id);
+                self.state.insert(id.clone(), done.state);
+                let t = self.cat.tweak(&id).unwrap().clone();
+                self.saved.state.insert(id.clone(), done.state);
+                if done.ok {
+                    if on { self.saved.applied.insert(id.clone()); } else { self.saved.applied.remove(&id); }
+                    self.reboot_pending |= t.reboot;
+                }
+                self.save();
+                if let Some(b) = &mut self.bulk {
+                    b.1 += done.ok as usize;
+                    b.2 |= t.reboot;
+                }
+                if !done.ok {
+                    self.toast(format!("{}: {}", t.name, done.err), RED, 8.0);
+                } else if done.state != on {
+                    self.toast(format!("{}: se ejecutó pero Windows no refleja el cambio todavía (puede requerir reinicio).", t.name), ACCENT, 7.0);
+                } else if !quiet {
+                    let reboot = if t.reboot && on { " · requiere reiniciar" } else { "" };
+                    self.toast(format!("{}: {}{reboot}", if on { "Activado" } else { "Revertido" }, t.name), if on { GREEN } else { ACCENT }, 4.5);
+                }
+                if self.page == Page::Backup {
+                    self.backups = engine::backups();
+                }
+            }
+            Msg::Boosted { id, ok, out, err } => {
+                self.busy.remove(&format!("b:{id}"));
+                let name = self.cat.boosts.iter().find(|b| b.id == id).map(|b| b.name.clone()).unwrap_or_default();
+                if ok {
+                    self.saved.boost_last.insert(id.clone(), unix_now());
+                    self.save();
+                    let out = if out.is_empty() { "Listo".to_string() } else { out };
+                    self.toast(format!("{name}: {out}"), GREEN, 4.5);
+                    self.boost_out.insert(id, out);
+                } else {
+                    self.toast(format!("{name}: {err}"), RED, 8.0);
+                }
+            }
+            Msg::Restore(r) => self.restore = Some(r),
+            Msg::RestoreCreated(r) => {
+                self.busy.remove("rp");
+                match r {
+                    Ok(()) => self.toast("Punto de restauración creado.", GREEN, 5.0),
+                    Err(e) => self.toast(format!("No se pudo crear: {e} (Windows permite uno cada 24 h y requiere la protección del sistema activa)."), RED, 9.0),
+                }
+                self.refresh_backups();
+            }
+            Msg::Stats(s, prev) => {
+                self.stats = s;
+                self.cpu_prev = prev;
+                self.stats_pending = false;
+            }
+        }
+    }
+
+    /// Procesa lo que mandaron los hilos, avanza la cola de cambios en lote y pide el uso en vivo.
+    fn pump(&mut self, ctx: &egui::Context) {
+        while let Ok(m) = self.rx.try_recv() {
+            self.handle(m);
+        }
+        while let Ok(l) = self.log_rx.try_recv() {
+            match l.lvl.as_str() {
+                "start" => {
+                    if self.running == 0 {
+                        self.run_start = Instant::now();
+                    }
+                    self.running += 1;
+                }
+                "enderr" => {
+                    self.running = self.running.saturating_sub(1);
+                    self.saved.console_open = true; // si algo falla, la consola se abre sola
+                }
+                x if x.starts_with("end") => self.running = self.running.saturating_sub(1),
+                _ => {}
+            }
+            self.lines.push(l);
+            if self.lines.len() > 2000 {
+                self.lines.remove(0);
+            }
+        }
+        // Cambios en lote: de a uno, para que los respaldos y la consola queden en orden.
+        let toggling = self.busy.iter().any(|b| !b.starts_with("b:") && b != "rp");
+        if !toggling {
+            if let Some(id) = self.queue.pop_front() {
+                self.start_toggle(id, true);
+            } else if let Some((total, ok, reboot)) = self.bulk.take() {
+                let tail = if reboot { " Reiniciá la PC para terminar de aplicar." } else { "" };
+                self.toast(format!("{ok}/{total} listas.{tail}"), if ok == total { GREEN } else { ACCENT }, 8.0);
+            }
+        }
+        // Uso en vivo: solo en Inicio y con el mouse sobre la ventana, para no gastar nada de fondo.
+        let watching = self.page == Page::Home && ctx.input(|i| i.pointer.has_pointer());
+        if watching && !self.stats_pending && self.stats_at.map_or(true, |t| t.elapsed() > Duration::from_secs(2)) {
+            self.stats_pending = true;
+            self.stats_at = Some(Instant::now());
+            let prev = self.cpu_prev;
+            self.spawn(move |tx, _, _| { let (s, now) = sys::stats(prev); let _ = tx.send(Msg::Stats(s, now)); });
+        }
+        let loading = self.spec.is_none() && self.scan_err.is_none() || !self.ps_ready || self.restore.is_none() && self.page == Page::Backup;
+        if !self.busy.is_empty() || self.running > 0 || loading || self.stats_pending || !self.toasts.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        } else if watching {
+            ctx.request_repaint_after(Duration::from_secs(2));
+        }
+    }
+
+    /// Dibuja el logo flotando (sube y baja). Solo se anima con el mouse sobre la ventana, para no gastar GPU de fondo.
+    pub fn floating_logo(&self, ui: &egui::Ui, center: Pos2, size: f32) {
+        let dy = if ui.input(|i| i.pointer.has_pointer()) {
+            ui.ctx().request_repaint_after(Duration::from_millis(33));
+            (ui.input(|i| i.time) * 1.85).sin() as f32 * size * 0.03
+        } else {
+            0.0
+        };
+        let rect = Rect::from_center_size(center + Vec2::new(0.0, dy), Vec2::splat(size));
+        let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+        let Some(tex) = &self.avatar else {
+            ui.painter().image(self.logo.id(), rect, uv, Color32::WHITE);
+            return;
+        };
+        // Imagen propia con el mismo marco que el logo: medidas tomadas de logo.png (512 px).
+        let (p, s) = (ui.painter(), size);
+        let bx = Rect::from_center_size(rect.center() - Vec2::new(0.0, 0.07 * s), Vec2::splat(0.707 * s));
+        let r = 0.137 * s;
+        let px = |f: f32| (f * s).round().clamp(1.0, 127.0);
+        p.add(egui::epaint::Shadow { offset: [0, px(0.09) as i8], blur: px(0.12) as u8, spread: 0, color: Color32::from_black_alpha(150) }.as_shape(bx, r));
+        p.add(egui::epaint::Shadow { offset: [0, 0], blur: px(0.08) as u8, spread: 0, color: ACCENT.gamma_multiply(0.35) }.as_shape(bx, r));
+        p.rect_filled(bx, r, CARD2); // fondo para imágenes con transparencia
+        p.add(egui::epaint::RectShape::filled(bx, r, Color32::WHITE).with_texture(tex.id(), uv));
+        p.rect_stroke(bx, r, egui::Stroke::new((0.008 * s).max(1.0), ACCENT), egui::StrokeKind::Inside);
+        let bc = rect.center() + Vec2::new(0.262 * s, 0.199 * s);
+        p.circle_filled(bc, 0.133 * s, Color32::from_rgb(14, 18, 32));
+        p.circle_filled(bc, 0.112 * s, ACCENT);
+        p.text(bc, Align2::CENTER_CENTER, ic::LIGHTNING, regular(0.14 * s), Color32::WHITE);
+    }
+
+    /// Cambia la imagen propia (o la quita con None) y la guarda para la próxima vez.
+    fn set_avatar(&mut self, ctx: &egui::Context, img: Option<Result<image::DynamicImage, String>>) {
+        match img {
+            None => {
+                let _ = std::fs::remove_file(avatar_path());
+                self.avatar = None;
+                self.toast("Volviste a la imagen original.", GREEN, 3.0);
+            }
+            Some(Ok(i)) => {
+                let sq = square(i);
+                let _ = std::fs::create_dir_all(avatar_path().parent().unwrap());
+                if let Err(e) = sq.save(avatar_path()) {
+                    self.toast(format!("La imagen se ve, pero no se pudo guardar: {e}"), YELLOW, 5.0);
+                }
+                self.avatar = Some(avatar_texture(ctx, &sq));
+                self.toast("Imagen cambiada.", GREEN, 3.0);
+            }
+            Some(Err(e)) => self.toast(format!("No se pudo usar la imagen: {e}"), RED, 5.0),
+        }
+    }
+
+    /// Barra lateral: marca arriba, secciones con nombre y estado de permisos abajo.
+    fn sidebar(&mut self, ui: &mut egui::Ui) {
+        let full = ui.max_rect();
+        let (brand, _) = ui.allocate_exact_size(Vec2::new(full.width(), 92.0), Sense::hover());
+        let c = brand.left_center() + Vec2::new(42.0, 2.0);
+        // Clic en el logo: menú para poner una imagen propia.
+        let hit = ui.interact(Rect::from_center_size(c, Vec2::splat(54.0)), ui.id().with("logo"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        if hit.hovered() {
+            ui.painter().rect_filled(hit.rect.expand(4.0), 12.0, Color32::from_white_alpha(10));
+        }
+        self.floating_logo(ui, c, 54.0);
+        let menu = ui.id().with("logo-menu");
+        if hit.clicked() {
+            ui.memory_mut(|m| m.toggle_popup(menu));
+        }
+        let hit = if ui.memory(|m| m.is_popup_open(menu)) { hit } else { hit.on_hover_text("Cambiar imagen") };
+        let mut pick = None;
+        egui::popup::popup_below_widget(ui, menu, &hit, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+            ui.set_min_width(230.0);
+            let item = |ui: &mut egui::Ui, icon: &str, t: &str| ui.add(egui::Button::new(RichText::new(format!("{icon}   {t}")).size(14.0)).frame(false).min_size(Vec2::new(222.0, 32.0))).on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
+            if item(ui, ic::FOLDER_OPEN, "Elegir imagen…") {
+                pick = Some(1);
+            }
+            if item(ui, ic::CLIPBOARD_TEXT, "Pegar imagen copiada") {
+                pick = Some(2);
+            }
+            if self.avatar.is_some() && item(ui, ic::ARROW_COUNTER_CLOCKWISE, "Volver a la original") {
+                pick = Some(3);
+            }
+        });
+        let ctx = ui.ctx().clone();
+        match pick {
+            Some(1) => {
+                let file = rfd::FileDialog::new().set_title("Elegí una imagen").add_filter("Imágenes", &["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tif", "tiff"]).pick_file();
+                if let Some(f) = file {
+                    self.set_avatar(&ctx, Some(open_image(f)));
+                }
+            }
+            Some(2) => self.set_avatar(&ctx, Some(clipboard_image())),
+            Some(3) => self.set_avatar(&ctx, None),
+            _ => {}
+        }
+        if self.running > 0 {
+            // Punto naranja: hay algo corriendo, aunque estés en otra sección.
+            let a = (ui.input(|i| i.time) * 5.0).sin() as f32 * 0.35 + 0.65;
+            ui.painter().circle_filled(c + Vec2::new(20.0, -20.0), 5.5, ACCENT.gamma_multiply(a));
+        }
+        ui.painter().text(brand.left_center() + Vec2::new(76.0, -8.0), Align2::LEFT_CENTER, "Botox", bold(19.0), TEXT);
+        ui.painter().text(brand.left_center() + Vec2::new(77.0, 13.0), Align2::LEFT_CENTER, "OPTIMIZER", semi(10.5), ACCENT);
+        ui.add_space(6.0);
+        for (i, (page, icon, name)) in NAV.iter().enumerate() {
+            if i == 6 {
+                let (r, _) = ui.allocate_exact_size(Vec2::new(full.width(), 10.0), Sense::hover());
+                ui.painter().hline(r.x_range().shrink(22.0), r.center().y, egui::Stroke::new(1.0_f32, LINE));
+            }
+            let (slot, resp) = ui.allocate_exact_size(Vec2::new(full.width(), 44.0), Sense::click());
+            let rect = slot.shrink2(Vec2::new(12.0, 0.0));
+            let (on, hov) = (self.page == *page, resp.hovered());
+            let h = ui.ctx().animate_bool_with_time(ui.id().with(("nav", i)), on || hov, 0.12);
+            let p = ui.painter().clone();
+            if h > 0.0 {
+                p.rect_filled(rect, 10.0, mix(SIDE, if on { Color32::from_rgb(30, 39, 70) } else { Color32::from_rgb(23, 31, 58) }, h));
+            }
+            if on {
+                p.rect_filled(Rect::from_min_size(Pos2::new(slot.left(), rect.top() + 11.0), Vec2::new(3.0, 22.0)), 2.0, ACCENT);
+            }
+            let col = if on { ACCENT } else if hov { TEXT } else { MUTED };
+            p.text(rect.left_center() + Vec2::new(16.0, 0.0), Align2::LEFT_CENTER, *icon, regular(20.0), col);
+            p.text(rect.left_center() + Vec2::new(48.0, 1.0), Align2::LEFT_CENTER, *name, if on { semi(14.0) } else { medium(14.0) }, if on { TEXT } else { col });
+            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("Ctrl+{}", i + 1)).clicked() {
+                self.actions.push(Action::Go(*page, None));
+            }
+        }
+        // Pie: si tiene permisos de administrador y la versión.
+        let p = ui.painter();
+        let pill = Rect::from_min_size(Pos2::new(full.left() + 14.0, full.bottom() - 70.0), Vec2::new(full.width() - 28.0, 36.0));
+        p.rect(pill, 10.0, CARD, egui::Stroke::new(1.0_f32, LINE), egui::StrokeKind::Inside);
+        let (dot, text) = if self.admin { (GREEN, "Administrador") } else { (YELLOW, "Solo lectura") };
+        p.circle_filled(pill.left_center() + Vec2::new(16.0, 0.0), 4.5, dot);
+        p.text(pill.left_center() + Vec2::new(30.0, 1.0), Align2::LEFT_CENTER, text, medium(13.0), TEXT);
+        p.text(Pos2::new(pill.center().x, full.bottom() - 18.0), Align2::CENTER_CENTER, format!("v{}", env!("CARGO_PKG_VERSION")), regular(11.5), DIM);
+    }
+
+    /// Atajos de teclado: Ctrl+1…7 secciones, Ctrl+F buscar, Ctrl+J consola, F5 escanear, Esc limpia la búsqueda.
+    fn keys(&mut self, ctx: &egui::Context) {
+        use egui::{Key, Modifiers};
+        if self.confirm.is_some() {
+            return;
+        }
+        let nums = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7];
+        for (i, k) in nums.into_iter().enumerate() {
+            if ctx.input_mut(|inp| inp.consume_key(Modifiers::CTRL, k)) {
+                self.actions.push(Action::Go(NAV[i].0, None));
+            }
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::F)) {
+            if !matches!(self.page, Page::Tweaks | Page::Debloat) {
+                self.actions.push(Action::Go(Page::Tweaks, None));
+            }
+            self.focus_search = true;
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::J)) {
+            self.saved.console_open = !self.saved.console_open;
+            self.save();
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F5)) {
+            self.actions.push(Action::Rescan);
+        }
+        if !self.query.is_empty() && ctx.input(|i| i.key_pressed(Key::Escape)) {
+            self.query.clear();
+        }
+    }
+
+    fn console(&mut self, ui: &mut egui::Ui) {
+        let color = |lvl: &str| match lvl {
+            "start" => ACCENT,
+            "ok" | "endok" => GREEN,
+            "err" | "enderr" => RED,
+            "warn" | "endwarn" => YELLOW,
+            "out" | "cmd" => MUTED,
+            _ => Color32::from_rgb(200, 208, 226),
+        };
+        // En pantalla van íconos; al copiar, texto plano que se lee en cualquier lado.
+        let prefix = |lvl: &str| match lvl { "start" => format!("{} ", ic::PLAY), "endok" | "ok" => format!("{} ", ic::CHECK), "enderr" | "err" => format!("{} ", ic::X), "endwarn" | "warn" => format!("{} ", ic::WARNING), _ => "  ".to_string() };
+        let plain = |lvl: &str| match lvl { "start" => "> ", "endok" | "ok" => "OK ", "enderr" | "err" => "ERROR ", "endwarn" | "warn" => "AVISO ", _ => "   " };
+        // La barra entera abre y cierra la consola. Se registra ANTES que los botones para quedar debajo:
+        // registrada después, se comía los clics de "Copiar" y "Limpiar".
+        let bar_rect = Rect::from_min_size(ui.max_rect().min, Vec2::new(ui.max_rect().width(), 38.0));
+        let bar = ui.interact(bar_rect, ui.id().with("console-bar"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        ui.horizontal(|ui| {
+            ui.set_height(38.0);
+            let (dot, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+            let a = if self.running > 0 { (ui.input(|i| i.time) * 5.0).sin() as f32 * 0.35 + 0.65 } else { 1.0 };
+            ui.painter().circle_filled(dot.center(), 4.5, if self.running > 0 { ACCENT.gamma_multiply(a) } else { DIM });
+            ui.label(RichText::new("Consola").font(semi(12.5)));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let small = |ui: &mut egui::Ui, text: &str| ui.add(egui::Button::new(RichText::new(text).font(medium(12.0)).color(MUTED)).fill(CARD2).stroke(egui::Stroke::NONE).corner_radius(6).min_size(Vec2::new(0.0, 24.0))).on_hover_cursor(egui::CursorIcon::PointingHand);
+                ui.spacing_mut().button_padding = Vec2::new(11.0, 3.0);
+                if small(ui, if self.saved.console_open { ic::CARET_DOWN } else { ic::CARET_UP }).on_hover_text("Mostrar u ocultar (Ctrl+J)").clicked() {
+                    self.saved.console_open = !self.saved.console_open;
+                    self.save();
+                }
+                if small(ui, "Limpiar").clicked() {
+                    self.lines.clear();
+                }
+                if small(ui, "Copiar").clicked() {
+                    ui.ctx().copy_text(self.lines.iter().map(|l| format!("{} {}{}", l.t, plain(&l.lvl), l.msg)).collect::<Vec<_>>().join("\n"));
+                    self.toast("Registro copiado al portapapeles", GREEN, 3.0);
+                }
+                if self.running > 0 {
+                    let s = self.run_start.elapsed().as_secs();
+                    ui.label(RichText::new(format!("{} {}:{:02}", ic::TIMER, s / 60, s % 60)).font(mono(12.5)).color(ACCENT));
+                }
+                // Última línea (sin la salida cruda), cortada si no entra.
+                let last = self.lines.iter().rev().find(|l| l.lvl != "out");
+                let (text, c) = last.map_or(("Acá vas a ver en vivo todo lo que hace la app.".to_string(), MUTED), |l| (format!("{}{}", prefix(&l.lvl).trim_start(), l.msg), color(&l.lvl)));
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.add(egui::Label::new(RichText::new(text).font(mono(12.5)).color(c)).truncate());
+                });
+            });
+        });
+        if bar.clicked() {
+            self.saved.console_open = !self.saved.console_open;
+            self.save();
+        }
+        if self.saved.console_open {
+            egui::ScrollArea::vertical().auto_shrink(false).stick_to_bottom(true).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 3.0;
+                ui.style_mut().interaction.selectable_labels = true;
+                for l in &self.lines {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(&l.t).font(mono(12.5)).color(DIM));
+                        let text = RichText::new(format!("{}{}", prefix(&l.lvl), l.msg)).font(mono(12.5)).color(color(&l.lvl));
+                        ui.add(egui::Label::new(if l.lvl == "start" { text.strong() } else { text }).wrap());
+                    });
+                }
+                ui.add_space(8.0);
+            });
+        }
+    }
+
+    fn overlays(&mut self, ctx: &egui::Context) {
+        // Avisos abajo a la derecha.
+        self.toasts.retain(|t| t.2.elapsed().as_secs_f32() < t.3);
+        let mut bottom = if self.saved.console_open { 300.0 } else { 52.0 };
+        // Un Area por aviso, apilados de abajo hacia arriba. Un Area, aunque no sea interactivo, tapa los clics de todo
+        // lo que queda debajo de su rectángulo: con uno solo en bottom_up ocupaba la columna derecha entera.
+        for (i, (msg, color, at, secs)) in self.toasts.iter().rev().enumerate() {
+            let shown = egui::Area::new(egui::Id::new(("toast", i))).anchor(egui::Align2::RIGHT_BOTTOM, [-22.0, -bottom]).interactable(false).show(ctx, |ui| {
+                // Aparece y se va con un fundido corto.
+                let age = at.elapsed().as_secs_f32();
+                let alpha = (age / 0.15).min(1.0).min((secs - age) / 0.4).clamp(0.0, 1.0);
+                let icon = if *color == GREEN { ic::CHECK_CIRCLE } else if *color == RED { ic::WARNING_CIRCLE } else { ic::INFO };
+                ui.multiply_opacity(alpha);
+                let r = egui::Frame::new().fill(Color32::from_rgb(27, 36, 67)).stroke(egui::Stroke::new(1.0_f32, LINE)).corner_radius(10).inner_margin(egui::Margin { left: 18, right: 16, top: 12, bottom: 12 }).show(ui, |ui| {
+                    ui.set_max_width(420.0);
+                    // Ícono y texto en un solo bloque: un layout horizontal acá se estira a toda la altura.
+                    let mut job = egui::text::LayoutJob::default();
+                    job.append(icon, 0.0, egui::TextFormat { font_id: regular(15.0), color: *color, ..Default::default() });
+                    job.append(msg, 9.0, egui::TextFormat { font_id: regular(13.5), color: TEXT, ..Default::default() });
+                    ui.add(egui::Label::new(job).wrap());
+                });
+                let bar = Rect::from_min_size(r.response.rect.min, Vec2::new(4.0, r.response.rect.height()));
+                ui.painter().rect_filled(bar, egui::CornerRadius { nw: 10, sw: 10, ne: 0, se: 0 }, *color);
+            });
+            bottom += shown.response.rect.height() + 8.0;
+        }
+        // Confirmación.
+        let mut answer = None;
+        let mut selected = usize::MAX; // en lote: cuántas quedaron tildadas
+        if let Some(c) = &self.confirm {
+            egui::Modal::new(egui::Id::new("confirm")).frame(panel()).show(ctx, |ui| {
+                ui.set_width(520.0);
+                // La primera línea es el título; el resto, el detalle.
+                let (head, body) = c.text.split_once("\n\n").unwrap_or((&c.text, ""));
+                // En lote, la pregunta va debajo de la lista.
+                let many = matches!(c.action, Action::ManyNow(_));
+                let body = if many { body.trim_end_matches("¿Continuar?").trim_end() } else { body };
+                // El título cuenta solo las que siguen tildadas.
+                let head = match &c.action {
+                    Action::ManyNow(ids) => head.replacen(&ids.len().to_string(), &ids.iter().filter(|id| !self.confirm_skip.contains(*id)).count().to_string(), 1),
+                    _ => head.to_string(),
+                };
+                ui.add(egui::Label::new(RichText::new(head).font(semi(17.0))).wrap());
+                if !body.is_empty() {
+                    ui.add(egui::Label::new(RichText::new(body).size(14.0).color(Color32::from_rgb(200, 208, 226))).wrap());
+                }
+                // En lote: la lista de lo que se va a tocar, para revisarla antes de aceptar.
+                if let Action::ManyNow(ids) = &c.action {
+                    let skip = &mut self.confirm_skip;
+                    let list: Vec<&catalog::Tweak> = ids.iter().filter_map(|id| self.cat.tweak(id)).collect();
+                    let picked: Vec<&&catalog::Tweak> = list.iter().filter(|t| !skip.contains(&t.id)).collect();
+                    let reboot = picked.iter().filter(|t| t.reboot).count();
+                    selected = picked.len();
+                    ui.horizontal(|ui| {
+                        let of = if selected < list.len() { format!(" de {}", list.len()) } else { String::new() };
+                        let rb = if reboot > 0 { format!(" · {reboot} necesitan reiniciar") } else { String::new() };
+                        ui.label(RichText::new(format!("Incluye: {selected}{of}{rb}")).font(semi(13.0)).color(MUTED));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            // Atajos para marcar o desmarcar todo.
+                            let link = |ui: &mut egui::Ui, t: &str| ui.add(egui::Label::new(RichText::new(t).size(12.5).color(ACCENT2)).sense(Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
+                            if link(ui, "Ninguna") {
+                                skip.extend(list.iter().map(|t| t.id.clone()));
+                            }
+                            if link(ui, "Todas") {
+                                skip.clear();
+                            }
+                        });
+                    });
+                    egui::Frame::new().fill(CARD).stroke(egui::Stroke::new(1.0_f32, LINE)).corner_radius(10).inner_margin(egui::Margin::symmetric(14, 8)).show(ui, |ui| {
+                        egui::ScrollArea::vertical().max_height(260.0).auto_shrink([false, true]).show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.y = 6.0;
+                            // Tilde naranja, para que se distinga de un vistazo.
+                            let wv = &mut ui.visuals_mut().widgets;
+                            for w in [&mut wv.inactive, &mut wv.hovered, &mut wv.active] {
+                                w.fg_stroke = egui::Stroke::new(2.0_f32, ACCENT);
+                            }
+                            for t in list {
+                                ui.horizontal(|ui| {
+                                    // Destildar = dejarla afuera de este lote.
+                                    let mut on = !skip.contains(&t.id);
+                                    if ui.checkbox(&mut on, "").on_hover_cursor(egui::CursorIcon::PointingHand).changed() {
+                                        if on { skip.remove(&t.id); } else { skip.insert(t.id.clone()); }
+                                    }
+                                    ui.add(egui::Label::new(RichText::new(&t.name).size(13.5).color(if on { TEXT } else { DIM })).truncate());
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if t.reboot {
+                                            ui.label(RichText::new(ic::ARROWS_CLOCKWISE).size(13.0).color(MUTED)).on_hover_text("Necesita reiniciar");
+                                        }
+                                        ui.label(RichText::new(self.cat.cat_name(&t.cat)).size(12.0).color(DIM));
+                                    });
+                                });
+                            }
+                        });
+                    });
+                    ui.label(RichText::new("¿Continuar?").size(14.0));
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let label = if selected == usize::MAX { "Continuar".to_string() } else { format!("Continuar con {selected}") };
+                    if ui.add_enabled_ui(selected > 0, |ui| button(ui, &label, Btn::Primary)).inner.clicked() {
+                        answer = Some(true);
+                    }
+                    if button(ui, "Cancelar", Btn::Ghost).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        answer = Some(false);
+                    }
+                });
+            });
+        }
+        if let Some(yes) = answer {
+            let mut c = self.confirm.take().unwrap();
+            let skip = std::mem::take(&mut self.confirm_skip);
+            if let Action::ManyNow(ids) = &mut c.action {
+                ids.retain(|id| !skip.contains(id));
+            }
+            if yes {
+                self.actions.push(c.action);
+            }
+        }
+    }
+
+    /// Captura para pruebas: BX_SHOT=archivo.png guarda la ventana cuando terminó de cargar y cierra.
+    /// BX_PAGE / BX_TAB eligen la pantalla; BX_DEMO=1 corre "Vaciar caché DNS" para ver la consola.
+    fn shot(&mut self, ctx: &egui::Context) {
+        let Ok(path) = std::env::var("BX_SHOT") else { return };
+        ctx.request_repaint();
+        let ready = self.spec.is_some() && self.ps_ready && (self.page != Page::Backup || self.restore.is_some());
+        if ready && self.frames == 0 && std::env::var("BX_DEMO").is_ok() {
+            self.admin = true;
+            self.saved.console_open = true;
+            self.actions.push(Action::RunBoost("dns".into()));
+            self.frames = 1;
+        }
+        // BX_CONFIRM=1: muestra la confirmación de "Activar … de bajo riesgo" con todos los tweaks (no aplica nada).
+        if ready && self.frames == 0 && self.confirm.is_none() && std::env::var("BX_CONFIRM").is_ok() {
+            let ids = self.cat.tweaks.iter().filter(|t| t.risk == "low").map(|t| t.id.clone()).collect::<Vec<_>>();
+            self.confirm_skip.extend(ids.iter().take(2).cloned()); // para ver casillas destildadas
+            self.confirm = Some(Confirm { text: format!("Se van a activar {} optimizaciones.\n\nConviene crear antes un punto de restauración (sección Backups).\n\n¿Continuar?", ids.len()), action: Action::ManyNow(ids) });
+        }
+        if ready && self.busy.is_empty() {
+            self.frames += 1;
+        }
+        if self.frames == 40 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+        }
+        let img = ctx.input(|i| i.raw.events.iter().find_map(|e| if let egui::Event::Screenshot { image, .. } = e { Some(image.clone()) } else { None }));
+        if let Some(img) = img {
+            let _ = image::save_buffer(&path, img.as_raw(), img.width() as u32, img.height() as u32, image::ColorType::Rgba8);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+}
+
+impl eframe::App for App {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.pump(ctx);
+        self.shot(ctx);
+        self.keys(ctx);
+        // Recuerda la ventana (se guarda al cerrar).
+        let vp = ctx.input(|i| (i.viewport().outer_rect, i.viewport().inner_rect, i.viewport().maximized, i.viewport().minimized));
+        if let (Some(o), Some(inn), Some(max), Some(false)) = vp {
+            self.saved.maximized = max;
+            if !max {
+                self.saved.win = Some([o.min.x, o.min.y, inn.width(), inn.height()]);
+            }
+        }
+        egui::SidePanel::left("nav").exact_width(SIDE_W).resizable(false).show_separator_line(false).frame(egui::Frame::new().fill(SIDE)).show(ctx, |ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(0.0, 4.0);
+            self.sidebar(ui);
+        });
+        egui::TopBottomPanel::bottom("console")
+            .exact_height(if self.saved.console_open { 288.0 } else { 38.0 })
+            .show_separator_line(false)
+            .frame(egui::Frame::new().fill(CONSOLE).inner_margin(egui::Margin::symmetric(18, 0)))
+            .show(ctx, |ui| self.console(ui));
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin { left: 40, right: 28, top: 28, bottom: 0 })).show(ctx, |ui| {
+            // Fundido y leve subida al cambiar de sección.
+            let t = (self.page_at.elapsed().as_secs_f32() / 0.22).min(1.0);
+            if t < 1.0 {
+                ctx.request_repaint();
+            }
+            let e = 1.0 - (1.0 - t).powi(3);
+            ui.multiply_opacity(e);
+            egui::ScrollArea::vertical().auto_shrink(false).id_salt(self.page as u8).show(ui, |ui| {
+                ui.set_width(ui.available_width() - 12.0);
+                ui.add_space((1.0 - e) * 14.0);
+                self.page(ui);
+                ui.add_space(30.0);
+            });
+        });
+        self.overlays(ctx);
+        for a in std::mem::take(&mut self.actions) {
+            self.act(a);
+        }
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) { App::save(self); }
+}

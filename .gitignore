@@ -1,0 +1,16 @@
+# Compilados y paquetes (se regeneran o se reparten aparte)
+target/
+rust/dist/
+*.exe
+*.zip
+
+# Versión Electron retirada (1,1 GB, casi todo node_modules)
+_electron-viejo/
+node_modules/
+
+# Por si algún día aparecen: nada de claves ni configuración local
+.env
+.env.*
+*.pem
+*.key
+.claude/
