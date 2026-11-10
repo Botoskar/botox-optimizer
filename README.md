@@ -15,7 +15,7 @@ El toolchain (Rust + mingw64) está en `M:\Github Things\botox-optimizer-rust` y
 ```bash
 cd rust
 cmd //c ".\\cargo.cmd build"                         # desarrollo, sin admin (modo solo lectura)
-cmd //c ".\\cargo.cmd test"                          # 17 tests
+cmd //c ".\\cargo.cmd test"                          # 24 tests
 BX_ADMIN=1 cmd //c ".\\cargo.cmd build --release"    # versión para usar: pide administrador
 ```
 
@@ -40,6 +40,12 @@ Las versiones anteriores a 2.1.0 no saben actualizarse: hay que pasarles el `.ex
 2. `node rust/tools/export-catalog.js`.
 3. Si usa una condición nueva en `rec` o `needs`, portala en `rust/src/catalog.rs` (`cond`).
 4. `cargo.cmd test` y `node rust/tools/parity.js <ruta al .exe sin admin>` (compara los estados de Rust con los scripts originales, solo lectura).
+
+## Escáner de hardware
+
+`rust/src/hwscan.rs` lee todo con WMI nativo (~0,3 s) y arma el mismo JSON que `scan.js`. Si WMI falla, la app cae solo al script de PowerShell (`scan.js`, ~5 s). Si agregás un dato al escáner, agregalo en los dos.
+
+`node rust/tools/parity-scan.js [ruta al .exe sin admin]` compara los dos campo por campo (solo lectura). Con el `.exe` de admin: `exe --scan > nativo.json`, `exe --scan ps > ps.json` (elevado) y `node rust/tools/parity-scan.js --files nativo.json ps.json`.
 
 ## Pruebas visuales
 

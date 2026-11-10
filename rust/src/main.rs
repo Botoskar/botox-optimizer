@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod catalog;
 mod engine;
+mod hwscan;
 mod pages;
 mod reg;
 mod startup;
@@ -156,6 +157,15 @@ fn main() -> eframe::Result {
         eprintln!("nativos: {native_ms} ms · total: {} ms · admin: {}", t0.elapsed().as_millis(), engine::is_admin());
         let sorted: std::collections::BTreeMap<_, _> = all.into_iter().collect();
         println!("{}", serde_json::to_string(&sorted).unwrap());
+        return Ok(());
+    }
+    // Modo de prueba, solo lectura: imprime el escaneo de hardware como JSON y sale. `--scan ps` usa el script de PowerShell.
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--scan") {
+        let t0 = Instant::now();
+        let spec = if args.get(i + 1).is_some_and(|a| a == "ps") { sys::scan_ps(&Catalog::load()) } else { hwscan::scan() };
+        eprintln!("escaneo: {} ms", t0.elapsed().as_millis());
+        println!("{}", spec.map_or_else(|e| format!("{{\"error\":{}}}", Value::String(e)), |v| v.to_string()));
         return Ok(());
     }
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).expect("icono");

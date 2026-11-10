@@ -1,6 +1,6 @@
 [package]
 name = "botox-optimizer"
-version = "2.1.0"
+version = "2.2.0"
 edition = "2021"
 description = "Optimizador de FPS y latencia para PC gamer con Windows"
 
@@ -9,6 +9,7 @@ eframe = { version = "0.31", default-features = false, features = ["glow", "defa
 egui-phosphor = "0.9"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico", "tiff"] }
 rfd = "0.15"
+wmi = "0.18"
 arboard = "3"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

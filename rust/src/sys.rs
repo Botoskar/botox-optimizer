@@ -5,9 +5,12 @@ use serde_json::Value;
 use std::os::windows::process::CommandExt;
 use std::process::Command;
 
-// shortcut: el escáner reutiliza el script de PowerShell de la app Electron (~5 s, corre de fondo).
-// Pasarlo a WMI nativo lo bajaría a ~1 s.
+/// Escaneo de hardware: nativo con WMI; si WMI falla, cae al script de PowerShell (más lento, mismo resultado).
 pub fn scan(cat: &Catalog) -> Result<Value, String> {
+    crate::hwscan::scan().or_else(|_| scan_ps(cat))
+}
+
+pub fn scan_ps(cat: &Catalog) -> Result<Value, String> {
     let o = run_ps("", &cat.scan, &Log(None));
     let json = o.out.find('{').map(|i| &o.out[i..]).unwrap_or_default();
     serde_json::from_str(json).map_err(|_| if o.err.is_empty() { "el escáner no devolvió datos".to_string() } else { o.err })
