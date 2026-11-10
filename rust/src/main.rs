@@ -6,6 +6,7 @@ mod reg;
 mod startup;
 mod sys;
 mod theme;
+mod update;
 
 use catalog::{Catalog, Facts};
 use eframe::egui::{self, Align2, Color32, Pos2, Rect, RichText, Sense, Vec2};
@@ -41,6 +42,10 @@ pub enum Msg {
     Restore(Result<Vec<(String, String)>, String>),
     RestoreCreated(Result<(), String>),
     Stats(sys::Stats, (u64, u64)),
+    /// Resultado de buscar una versión nueva al abrir.
+    Update(Result<Option<update::Update>, String>),
+    /// Resultado de bajar e instalar la versión nueva.
+    Updated(Result<(), String>),
 }
 
 /// Lo que el usuario pidió durante el dibujado; se ejecuta al terminar el frame.
@@ -62,6 +67,9 @@ pub enum Action {
     /// Enciende o apaga el programa de arranque que está en esa posición de la lista.
     Startup(usize),
     RescanStartup,
+    /// Pide confirmación para instalar la versión nueva; UpdateNow la instala.
+    Update,
+    UpdateNow,
 }
 
 pub struct Confirm { pub text: String, pub action: Action }
@@ -127,6 +135,9 @@ pub struct App {
     pub avatar: Option<egui::TextureHandle>,
     /// Programas que arrancan con Windows (se lee al entrar a la sección).
     pub startup: Vec<startup::Item>,
+    /// Versión nueva disponible en GitHub, y si se está instalando.
+    pub update: Option<update::Update>,
+    pub updating: bool,
     frames: u32,
     /// Cuándo se cambió de página (para el fundido de entrada).
     page_at: Instant,
@@ -214,6 +225,8 @@ impl App {
             cat: Arc::new(Catalog::load()),
             page: match std::env::var("BX_PAGE").as_deref() { Ok("scan") => Page::Scan, Ok("tweaks") => Page::Tweaks, Ok("debloat") => Page::Debloat, Ok("boost") => Page::Boost, Ok("backup") => Page::Backup, Ok("startup") => Page::Startup, _ => Page::Home },
             startup: Vec::new(),
+            update: None,
+            updating: false,
             tab: std::env::var("BX_TAB").unwrap_or_else(|_| "all".into()),
             query: String::new(),
             admin: engine::is_admin(),
@@ -265,6 +278,8 @@ impl App {
         if app.page == Page::Startup {
             app.startup = startup::scan();
         }
+        update::cleanup_old();
+        app.spawn(|tx, _, _| { let _ = tx.send(Msg::Update(update::check())); });
         app
     }
 
@@ -396,6 +411,18 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
 
 ¿Continuar?".into(), action: Action::RebootNow });
             }
+            Action::Update => {
+                if let (Some(u), false) = (&self.update, self.updating) {
+                    let text = format!("Actualizar a la versión {}\n\nSe descarga, se verifica el archivo y la app se reinicia sola. Tus ajustes no se tocan.\n\n¿Continuar?", u.version);
+                    self.confirm = Some(Confirm { text, action: Action::UpdateNow });
+                }
+            }
+            Action::UpdateNow => {
+                let Some(u) = self.update.clone().filter(|_| !self.updating) else { return };
+                self.updating = true;
+                engine::Log(Some(self.log_tx.clone())).put("start", format!("Actualizando a la versión {}", u.version));
+                self.spawn(move |tx, _, _| { let _ = tx.send(Msg::Updated(update::install(&u))); });
+            }
             Action::RebootNow => {
                 let _ = std::process::Command::new("shutdown.exe").args(["/r", "/t", "5"]).spawn();
                 self.toast("Reiniciando en 5 segundos…", ACCENT, 6.0);
@@ -502,6 +529,30 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
                 } else {
                     self.toast(format!("{name}: {err}"), RED, 8.0);
                 }
+            }
+            Msg::Update(Ok(Some(u))) => {
+                engine::Log(Some(self.log_tx.clone())).put("ok", format!("Hay una versión nueva: {}", u.version));
+                self.update = Some(u);
+            }
+            // Sin internet, sin versiones publicadas o ya al día: no se molesta al usuario.
+            Msg::Update(_) => {}
+            Msg::Updated(Ok(())) => {
+                let log = engine::Log(Some(self.log_tx.clone()));
+                log.put("endok", "Versión nueva instalada: reabriendo");
+                App::save(self);
+                match std::env::current_exe().and_then(|exe| std::process::Command::new(exe).spawn()) {
+                    Ok(_) => std::process::exit(0),
+                    Err(e) => {
+                        self.updating = false;
+                        self.update = None;
+                        self.toast(format!("Se actualizó, pero no se pudo reabrir ({e}). Abrila a mano."), ACCENT, 10.0);
+                    }
+                }
+            }
+            Msg::Updated(Err(e)) => {
+                self.updating = false;
+                engine::Log(Some(self.log_tx.clone())).put("enderr", e.clone());
+                self.toast(e, RED, 9.0);
             }
             Msg::Restore(r) => self.restore = Some(r),
             Msg::RestoreCreated(r) => {

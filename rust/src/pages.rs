@@ -92,6 +92,27 @@ impl App {
             });
             return;
         }
+        if let Some(u) = self.update.clone() {
+            egui::Frame::new().fill(Color32::from_rgb(34, 27, 18)).stroke(Stroke::new(1.0_f32, Color32::from_rgb(92, 62, 24))).corner_radius(12).inner_margin(egui::Margin::symmetric(18, 9)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    if self.updating {
+                        ui.add(egui::Spinner::new().size(18.0).color(ACCENT));
+                        ui.label(RichText::new(format!("Instalando la versión {}…", u.version)).font(semi(14.0)));
+                    } else {
+                        ui.label(RichText::new(ic::ARROW_CIRCLE_UP).size(18.0).color(ACCENT));
+                        ui.label(RichText::new(format!("Hay una versión nueva: {}", u.version)).font(semi(14.0)));
+                        ui.label(muted(format!("(tenés la {})", env!("CARGO_PKG_VERSION"))));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if button(ui, "Actualizar", Btn::Primary).clicked() {
+                                self.actions.push(Action::Update);
+                            }
+                        });
+                    }
+                });
+            });
+            ui.add_space(10.0);
+        }
         if self.reboot_pending {
             egui::Frame::new().fill(Color32::from_rgb(20, 34, 67)).stroke(Stroke::new(1.0_f32, BLUE)).corner_radius(12).inner_margin(egui::Margin::symmetric(18, 9)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
