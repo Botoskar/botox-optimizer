@@ -801,6 +801,21 @@ impl App {
 
     // ── Backups ──
 
+    /// Guarda las optimizaciones activas en un .botox. Solo lectura: no toca la PC.
+    fn export_profile(&mut self) {
+        let applied: Vec<String> = self.cat.tweaks.iter().filter(|t| self.on(&t.id)).map(|t| t.id.clone()).collect();
+        if applied.is_empty() {
+            return self.toast("No hay optimizaciones activas para exportar.", ACCENT, 4.0);
+        }
+        let pc_summary = self.spec.as_ref().map(|sp| format!("{} + {}, {} GB", cpu_short(s(&sp["cpu"]["name"])), s(&sys::main_gpu(sp)["name"]), self.facts.ram_gb)).unwrap_or_default();
+        let Some(path) = rfd::FileDialog::new().set_title("Guardar perfil").add_filter("Perfil de Botox Optimizer", &["botox"]).set_file_name("mi-perfil.botox").save_file() else { return };
+        let p = crate::profile::Profile { version: env!("CARGO_PKG_VERSION").into(), applied, saved_at: unix_now(), pc_summary };
+        match crate::profile::export(&p, &path) {
+            Ok(()) => self.toast(format!("Perfil guardado con {} optimizaciones.", p.applied.len()), GREEN, 4.0),
+            Err(e) => self.toast(e, RED, 6.0),
+        }
+    }
+
     fn backup_page(&mut self, ui: &mut Ui) {
         let creating = self.busy.contains("rp");
         header(ui, "Backups", "Cada cambio guarda antes los valores originales.", |ui| {
@@ -854,6 +869,12 @@ impl App {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if button(ui, "Revertir todo", Btn::Danger).clicked() {
                         self.actions.push(Action::RevertAll);
+                    }
+                    if button(ui, "Importar perfil", Btn::Ghost).on_hover_text("Aplica las optimizaciones de un perfil .botox (por ejemplo, después de formatear).").clicked() {
+                        self.actions.push(Action::ImportProfile);
+                    }
+                    if button(ui, "Exportar perfil", Btn::Ghost).on_hover_text("Guarda en un archivo .botox qué optimizaciones tenés activas, para reaplicarlas después.").clicked() {
+                        self.export_profile();
                     }
                 });
             });

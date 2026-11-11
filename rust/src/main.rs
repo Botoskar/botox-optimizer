@@ -4,6 +4,7 @@ mod diag;
 mod engine;
 mod hwscan;
 mod pages;
+mod profile;
 mod reg;
 mod sha256;
 mod startup;
@@ -75,6 +76,8 @@ pub enum Action {
     RescanStartup,
     /// Vuelve a leer el estado de los tweaks sin borrar el que se muestra (no reescanea el hardware).
     Verify,
+    /// Elige un perfil .botox y muestra la confirmación de lote con lo que aplica a esta PC.
+    ImportProfile,
     /// Pide confirmación para instalar la versión nueva; UpdateNow la instala.
     Update,
     UpdateNow,
@@ -661,6 +664,32 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
                 self.spawn(|tx, log, cat| { let _ = tx.send(Msg::RestoreCreated(engine::create_restore_point(&cat, &log))); });
             }
             Action::OpenRestore => engine::open_system_restore(),
+            Action::ImportProfile => {
+                if self.need_admin() {
+                    return;
+                }
+                if !self.ps_ready {
+                    self.toast("Esperá a que termine de leer el estado de tu PC.", ACCENT, 4.0);
+                    return;
+                }
+                let Some(path) = rfd::FileDialog::new().set_title("Elegí un perfil").add_filter("Perfil de Botox Optimizer", &["botox"]).pick_file() else { return };
+                let (p, dropped) = match profile::import(&path, &self.cat) {
+                    Ok(x) => x,
+                    Err(e) => return self.toast(format!("No se pudo importar: {e}"), RED, 7.0),
+                };
+                // Solo lo que corresponde a esta PC y se sabe que está apagado; las de riesgo medio, destildadas.
+                let f = &self.facts;
+                let ids: Vec<String> = p.applied.iter().filter(|id| self.cat.tweak(id).is_some_and(|t| (t.cat != "laptop" || f.laptop) && t.applies(f)) && self.state.get(*id) == Some(&false)).cloned().collect();
+                let left = p.applied.len() - ids.len() + dropped;
+                if ids.is_empty() {
+                    return self.toast("Nada para aplicar: lo del perfil ya está activo o no corresponde a esta PC.", ACCENT, 6.0);
+                }
+                self.confirm_skip = ids.iter().filter(|id| self.cat.tweak(id).is_some_and(|t| t.risk != "low")).cloned().collect();
+                let from = if p.pc_summary.is_empty() { String::new() } else { format!("Perfil de: {}. ", p.pc_summary) };
+                let note = if left > 0 { format!("{left} quedan afuera (ya activas, no aplican a esta PC o son de otra versión). ") } else { String::new() };
+                let text = format!("Se van a aplicar {} optimizaciones del perfil.\n\n{from}{note}Las de riesgo medio quedan destildadas: tildalas si las querés.\n\n¿Continuar?", ids.len());
+                self.confirm = Some(Confirm { text, action: Action::ManyNow(ids) });
+            }
             Action::RevertAll => {
                 let ids = self.reversible();
                 if ids.is_empty() {
