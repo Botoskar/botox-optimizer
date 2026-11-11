@@ -1,16 +1,27 @@
 //! Motor: aplica, revierte y chequea tweaks. Registro, servicios y energía van nativos;
 //! lo que depende de cmdlets de Windows (apps, tareas, placa de red) corre sus scripts de PowerShell.
 use crate::catalog::{Boost, Catalog, PwrEntry, Tweak};
-use crate::reg;
+use crate::{reg, win};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
-use std::os::windows::process::CommandExt;
-use std::process::{Command, Stdio};
+use std::path::PathBuf;
+use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-const NO_WINDOW: u32 = 0x0800_0000;
+/// Procesos de PowerShell vivos, para poder cancelarlos desde la consola.
+static PS_PIDS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+/// Cambia cuando el usuario cancela: cada trabajo compara su generación al terminar.
+static CANCEL_GEN: AtomicU64 = AtomicU64::new(0);
+
+const T_CHECK: Duration = Duration::from_secs(120);
+const T_ACTION: Duration = Duration::from_secs(600);
+const T_LONG: Duration = Duration::from_secs(1800);
+
+fn exe(name: &str) -> PathBuf { win::system32_exe(name) }
 
 /// Línea de la consola de actividad. lvl: start, info, ok, warn, cmd, out, endok, endwarn, enderr.
 #[derive(Clone, Debug)]
@@ -36,8 +47,8 @@ pub fn is_admin() -> bool {
 }
 
 /// Corre un programa sin ventana. Devuelve (código de salida, salida estándar).
-fn run(exe: &str, args: &[&str]) -> (i32, String) {
-    match Command::new(exe).args(args).creation_flags(NO_WINDOW).stdin(Stdio::null()).output() {
+fn run(exe: &std::path::Path, args: &[&str]) -> (i32, String) {
+    match win::secure_command(exe).args(args).stdin(Stdio::null()).output() {
         Ok(o) => (o.status.code().unwrap_or(-1), String::from_utf8_lossy(&o.stdout).into_owned()),
         Err(e) => (-1, e.to_string()),
     }
@@ -59,7 +70,7 @@ fn start_names(v: i64) -> Option<(&'static str, &'static str)> {
 fn set_value(p: &str, n: &str, v: &Value, t: &str, log: &Log) -> Result<(), String> {
     let old = reg::get(p, n).map(|x| x.0);
     if let (Some(svc), Some((arg, new))) = (reg::service_of(p, n), v.as_i64().and_then(start_names)) {
-        let (code, _) = run("sc.exe", &["config", svc, "start=", arg]);
+        let (code, _) = run(&exe("sc.exe"), &["config", svc, "start=", arg]);
         if code != 0 {
             return Err(format!("no se pudo cambiar el servicio {svc} (sc.exe devolvió {code}; 5 = acceso denegado)"));
         }
@@ -94,7 +105,7 @@ fn backup(id: &str, items: Vec<Value>, log: &Log) -> Result<(), String> {
 
 /// Valor actual (con corriente) de un ajuste del plan activo. Se lee del texto de powercfg sin depender del idioma.
 pub fn pwr_get(sub: &str, set: &str) -> Option<i64> {
-    let (_, out) = run("powercfg.exe", &["/qh", "SCHEME_CURRENT", sub, set]);
+    let (_, out) = run(&exe("powercfg.exe"), &["/qh", "SCHEME_CURRENT", sub, set]);
     let b = out.as_bytes();
     let hex: Vec<i64> = (0..b.len().saturating_sub(9))
         .filter(|&i| b[i] == b'0' && b[i + 1] == b'x' && b[i + 2..i + 10].iter().all(u8::is_ascii_hexdigit))
@@ -119,9 +130,9 @@ fn pwr_name(set: &str) -> &str {
 fn pwr_set(sub: &str, set: &str, v: i64, ac_only: bool, log: &Log) {
     let old = pwr_get(sub, set);
     let val = v.to_string();
-    run("powercfg.exe", &["/setacvalueindex", "SCHEME_CURRENT", sub, set, &val]);
+    run(&exe("powercfg.exe"), &["/setacvalueindex", "SCHEME_CURRENT", sub, set, &val]);
     if !ac_only {
-        run("powercfg.exe", &["/setdcvalueindex", "SCHEME_CURRENT", sub, set, &val]);
+        run(&exe("powercfg.exe"), &["/setdcvalueindex", "SCHEME_CURRENT", sub, set, &val]);
     }
     let when = if ac_only { " (enchufada)" } else { "" };
     log.put("info", format!("Plan de energía{when} · {}: {} → {v}", pwr_name(set), old.map_or("?".into(), |o| o.to_string())));
@@ -145,7 +156,7 @@ fn apply_native(t: &Tweak, log: &Log) -> Result<(), String> {
         }
         for e in live(t).filter(|e| e.svc && e.v.as_i64() == Some(4)) {
             let svc = reg::service_of(&e.p, &e.n).unwrap_or_default();
-            if run("sc.exe", &["stop", svc]).0 == 0 {
+            if run(&exe("sc.exe"), &["stop", svc]).0 == 0 {
                 log.put("info", format!("Servicio {svc}: detenido"));
             }
         }
@@ -155,52 +166,115 @@ fn apply_native(t: &Tweak, log: &Log) -> Result<(), String> {
         for x in &t.pwr {
             pwr_set(&x.sub, &x.set, x.v, t.ac, log);
         }
-        run("powercfg.exe", &["/setactive", "SCHEME_CURRENT"]);
+        run(&exe("powercfg.exe"), &["/setactive", "SCHEME_CURRENT"]);
     }
     Ok(())
 }
 
+fn allowed_entry<'a>(t: &'a Tweak, p: &str, n: &str) -> Option<&'a crate::catalog::RegEntry> {
+    t.reg.iter().find(|e| e.p.eq_ignore_ascii_case(p) && e.n.eq_ignore_ascii_case(n) && (!e.svc || reg::key_exists(&e.p)))
+}
+
+fn start_service(name: &str, log: &Log) {
+    let (code, out) = run(&exe("sc.exe"), &["start", name]);
+    if code == 0 {
+        log.put("info", format!("Servicio {name}: iniciado"));
+    } else if code != 1056 {
+        // 1056 = el servicio ya estaba en ejecución.
+        let msg = out.trim();
+        if !msg.is_empty() {
+            log.put("warn", format!("Servicio {name}: no se pudo iniciar ({msg})"));
+        }
+    }
+}
+
 fn revert_native(t: &Tweak, log: &Log) -> Result<(), String> {
-    let bk = reg::take_backup(&t.id);
+    let bk = match reg::read_backup(&t.id) {
+        Ok(b) => b,
+        // Un respaldo dañado no se aplica ni se borra: mejor no tocar nada que revertir a ciegas.
+        Err(e) => return Err(format!("{e}. No se cambió nada.")),
+    };
     match &bk {
         Some(_) => log.put("info", format!("Restaurando desde el respaldo {}", reg::backup_path(&t.id).display())),
         None => log.put("warn", "Sin respaldo: se vuelve a los valores por defecto de Windows"),
     }
     let s = |v: &Value, k: &str| v[k].as_str().unwrap_or_default().to_string();
+    let key = |p: &str, n: &str| format!("{}\u{0}{}", p.to_ascii_lowercase(), n.to_ascii_lowercase());
+    let mut started: HashSet<String> = HashSet::new();
     if !t.reg.is_empty() {
         let mut done = HashSet::new();
         for i in bk.iter().flatten() {
             let (p, n) = (s(i, "p"), s(i, "n"));
-            if i["e"].as_bool() == Some(true) {
+            // El respaldo puede haber sido manipulado: solo se aceptan rutas/nombres que estén en el catálogo.
+            if allowed_entry(t, &p, &n).is_none() {
+                log.put("warn", format!("El respaldo de '{}' trae una entrada ajena al ajuste ({p}\\{n}): se saltea", t.id));
+                continue;
+            }
+            let Some(exists) = i["e"].as_bool() else {
+                log.put("warn", format!("El respaldo de '{}' trae una entrada sin estado ({p}\\{n}): se saltea", t.id));
+                continue;
+            };
+            if n.eq_ignore_ascii_case("Start") && i["v"].as_i64() == Some(2) {
+                if let Some(svc) = reg::service_of(&p, &n) {
+                    started.insert(svc.to_string());
+                }
+            }
+            if exists {
                 set_value(&p, &n, &i["v"], i["t"].as_str().unwrap_or("DWord"), log)?;
             } else {
                 del_value(&p, &n, log);
             }
-            done.insert((p, n));
+            done.insert(key(&p, &n));
         }
         // Lo que no está en el respaldo (respaldo viejo o incompleto) vuelve al valor por defecto de Windows.
-        for e in live(t).filter(|e| !done.contains(&(e.p.clone(), e.n.clone()))) {
-            if e.def.is_null() { del_value(&e.p, &e.n, log) } else { set_value(&e.p, &e.n, &e.def, &e.t, log)? }
+        for e in live(t).filter(|e| !done.contains(&key(&e.p, &e.n))) {
+            if e.def.is_null() {
+                del_value(&e.p, &e.n, log)
+            } else {
+                set_value(&e.p, &e.n, &e.def, &e.t, log)?
+            }
         }
     }
     if !t.pwr.is_empty() {
         match &bk {
             Some(items) => {
                 for i in items {
+                    let (sub, set) = (s(i, "s"), s(i, "k"));
+                    if !t.pwr.iter().any(|x| x.sub.eq_ignore_ascii_case(&sub) && x.set.eq_ignore_ascii_case(&set)) {
+                        log.put("warn", format!("El respaldo de '{}' trae un ajuste de energía ajeno ({sub}/{set}): se saltea", t.id));
+                        continue;
+                    }
                     if let Some(v) = i["v"].as_i64() {
-                        pwr_set(&s(i, "s"), &s(i, "k"), v, t.ac, log);
+                        pwr_set(&sub, &set, v, t.ac, log);
                     }
                 }
             }
             None => t.pwr.iter().for_each(|x: &PwrEntry| pwr_set(&x.sub, &x.set, x.def, t.ac, log)),
         }
-        run("powercfg.exe", &["/setactive", "SCHEME_CURRENT"]);
+        run(&exe("powercfg.exe"), &["/setactive", "SCHEME_CURRENT"]);
     }
+    // Revertir el arranque de un servicio no alcanza: si estaba en automático, se vuelve a poner en marcha.
+    for svc in started {
+        start_service(&svc, log);
+    }
+    reg::remove_backup(&t.id);
     Ok(())
 }
 
 pub fn check_native(t: &Tweak) -> bool {
-    let reg_ok = live(t).all(|e| reg::get(&e.p, &e.n).is_some_and(|c| reg::fmt(&c.0) == reg::fmt(&e.v)));
+    let reg_ok = if t.reg.is_empty() {
+        true
+    } else {
+        let mut any = false;
+        for e in live(t) {
+            any = true;
+            if !reg::get(&e.p, &e.n).is_some_and(|c| reg::fmt(&c.0) == reg::fmt(&e.v)) {
+                return false;
+            }
+        }
+        // Si todos los servicios del ajuste faltan en esta PC, no está aplicado (antes `all()` vacío daba true).
+        any
+    };
     reg_ok && t.pwr.iter().all(|x| pwr_get(&x.sub, &x.set) == Some(x.v))
 }
 
@@ -210,26 +284,57 @@ pub struct PsOut { pub ok: bool, pub out: String, pub err: String }
 
 /// Corre un script con el preludio del catálogo. Las líneas `LOG:nivel|mensaje` y la salida van en vivo a la consola.
 pub fn run_ps(prelude: &str, script: &str, log: &Log) -> PsOut {
+    run_ps_with(prelude, script, log, Duration::from_secs(300), &[])
+}
+
+/// Igual que `run_ps`, con timeout y variables de entorno para el hijo (nunca interpoladas en el script).
+pub fn run_ps_with(prelude: &str, script: &str, log: &Log, timeout: Duration, env: &[(&str, &str)]) -> PsOut {
     let fail = |e: String| PsOut { ok: false, out: String::new(), err: e };
+    let dir = match win::script_dir() {
+        Ok(d) => d,
+        Err(e) => return fail(e),
+    };
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-    let file = std::env::temp_dir().join(format!("botox-{}-{nanos:x}.ps1", std::process::id()));
+    let file = dir.join(format!("botox-{}-{nanos:x}.ps1", std::process::id()));
     // BOM: PowerShell 5.1 lee el archivo como UTF-8 solo si lo trae.
     let body = format!("\u{feff}{prelude}\ntry {{\n{script}\n}} catch {{ Write-Output ('ERR:' + $_.Exception.Message); exit 1 }}");
     if let Err(e) = std::fs::write(&file, body) {
         return fail(e.to_string());
     }
-    let child = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
+    let mut cmd = win::secure_command(win::powershell());
+    cmd.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
         .arg(&file)
-        .creation_flags(NO_WINDOW)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-    let mut child = match child {
+        .stderr(Stdio::piped());
+    for &(k, v) in env {
+        cmd.env(k, v);
+    }
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => return fail(format!("no se pudo iniciar PowerShell: {e}")),
+        Err(e) => {
+            let _ = std::fs::remove_file(&file);
+            return fail(format!("no se pudo iniciar PowerShell: {e}"));
+        }
     };
+    let pid = child.id();
+    if let Ok(mut v) = PS_PIDS.lock() {
+        v.push(pid);
+    }
+    let gen = CANCEL_GEN.load(Ordering::SeqCst);
+    // El vigilante mata el árbol si el script se pasa del tiempo. La lectura de stdout termina sola al morir el proceso.
+    let timed = Arc::new(AtomicBool::new(false));
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    {
+        let timed = timed.clone();
+        std::thread::spawn(move || {
+            if stop_rx.recv_timeout(timeout).is_err() {
+                timed.store(true, Ordering::SeqCst);
+                let pid = pid.to_string();
+                let _ = run(&exe("taskkill.exe"), &["/T", "/F", "/PID", pid.as_str()]);
+            }
+        });
+    }
     // stderr se lee en otro hilo para que ninguno de los dos tubos se llene y trabe el proceso.
     let mut stderr = child.stderr.take().unwrap();
     let errlog = log.clone();
@@ -260,13 +365,37 @@ pub fn run_ps(prelude: &str, script: &str, log: &Log) -> PsOut {
         out.push_str(line);
         out.push('\n');
     }
+    let _ = stop_tx.send(());
     let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
+    if let Ok(mut v) = PS_PIDS.lock() {
+        v.retain(|&x| x != pid);
+    }
     let stderr = errs.join().unwrap_or_default();
     let _ = std::fs::remove_file(&file);
+    let timed_out = timed.load(Ordering::SeqCst);
+    let cancelled = CANCEL_GEN.load(Ordering::SeqCst) != gen;
+    if timed_out {
+        log.put("warn", format!("El script superó {} s: se canceló", timeout.as_secs()));
+    }
     let out = out.trim().to_string();
     let caught = out.split_once("ERR:").map(|x| x.1.trim().to_string());
-    let err = caught.clone().unwrap_or_else(|| if code != 0 { if stderr.trim().is_empty() { format!("PowerShell terminó con código {code}") } else { stderr.trim().to_string() } } else { String::new() });
-    PsOut { ok: code == 0 && caught.is_none(), out, err }
+    let mut err = caught.clone().unwrap_or_else(|| if code != 0 { if stderr.trim().is_empty() { format!("PowerShell terminó con código {code}") } else { stderr.trim().to_string() } } else { String::new() });
+    if timed_out {
+        err = format!("PowerShell superó el tiempo máximo ({} s) y se canceló", timeout.as_secs());
+    } else if cancelled {
+        err = "Cancelado por el usuario".into();
+    }
+    PsOut { ok: code == 0 && caught.is_none() && !timed_out && !cancelled, out, err }
+}
+
+/// Mata los PowerShell en curso (y sus hijos) y hace que los trabajos en curso terminen como cancelados.
+pub fn cancel_all() {
+    CANCEL_GEN.fetch_add(1, Ordering::SeqCst);
+    let pids: Vec<u32> = PS_PIDS.lock().map(|v| v.clone()).unwrap_or_default();
+    for pid in pids {
+        let pid = pid.to_string();
+        let _ = run(&exe("taskkill.exe"), &["/T", "/F", "/PID", pid.as_str()]);
+    }
 }
 
 // ── Operaciones que usa la interfaz ──
@@ -274,7 +403,7 @@ pub fn run_ps(prelude: &str, script: &str, log: &Log) -> PsOut {
 pub fn check(cat: &Catalog, t: &Tweak) -> bool {
     match &t.ps {
         None => check_native(t),
-        Some(ps) => run_ps(&cat.prelude, &ps.check, &Log(None)).out.trim_end().ends_with("True"),
+        Some(ps) => run_ps_with(&cat.prelude, &ps.check, &Log(None), T_CHECK, &[]).out.trim_end().ends_with("True"),
     }
 }
 
@@ -295,7 +424,7 @@ pub fn check_all_ps(cat: &Catalog) -> HashMap<String, bool> {
             .iter()
             .map(|script| {
                 s.spawn(move || {
-                    let out = run_ps(&cat.prelude, &format!("{script}$r | ConvertTo-Json -Compress"), &Log(None)).out;
+                    let out = run_ps_with(&cat.prelude, &format!("{script}$r | ConvertTo-Json -Compress"), &Log(None), T_CHECK, &[]).out;
                     // Un chequeo que devuelve algo raro (lista, vacío) cuenta como "no aplicado" en vez de tirar todo el grupo.
                     let map: HashMap<String, serde_json::Value> = out.find('{').and_then(|i| serde_json::from_str(&out[i..]).ok()).unwrap_or_default();
                     map.into_iter().map(|(k, v)| (k, v.as_bool().unwrap_or(false))).collect::<HashMap<_, _>>()
@@ -360,7 +489,7 @@ pub fn toggle(cat: &Catalog, t: &Tweak, on: bool, log: &Log) -> Done {
     let res = match &t.ps {
         None => if on { apply_native(t, log) } else { revert_native(t, log) },
         Some(ps) => {
-            let o = run_ps(&cat.prelude, if on { &ps.apply } else { &ps.revert }, log);
+            let o = run_ps_with(&cat.prelude, if on { &ps.apply } else { &ps.revert }, log, T_ACTION, &[]);
             if o.ok { Ok(()) } else { Err(o.err) }
         }
     };
@@ -385,7 +514,7 @@ pub fn toggle(cat: &Catalog, t: &Tweak, on: bool, log: &Log) -> Done {
 pub fn boost(cat: &Catalog, b: &Boost, log: &Log) -> (bool, String, String) {
     let t0 = Instant::now();
     log.put("start", b.name.clone());
-    let o = run_ps(&cat.prelude, &b.ps, log);
+    let o = run_ps_with(&cat.prelude, &b.ps, log, T_LONG, &[]);
     if o.ok {
         log.put("endok", format!("Listo en {} s", secs(t0)));
     } else {
@@ -396,7 +525,7 @@ pub fn boost(cat: &Catalog, b: &Boost, log: &Log) -> (bool, String, String) {
 
 /// Puntos de restauración: (descripción, fecha). Err si no se pudieron listar (hace falta administrador).
 pub fn restore_points(cat: &Catalog) -> Result<Vec<(String, String)>, String> {
-    let o = run_ps(&cat.prelude, "@(Get-ComputerRestorePoint | Sort-Object SequenceNumber -Descending | ForEach-Object { [ordered]@{ d = $_.Description; t = $_.ConvertToDateTime($_.CreationTime).ToString('yyyy-MM-dd HH:mm') } }) | ConvertTo-Json -Compress", &Log(None));
+    let o = run_ps_with(&cat.prelude, "@(Get-ComputerRestorePoint | Sort-Object SequenceNumber -Descending | ForEach-Object { [ordered]@{ d = $_.Description; t = $_.ConvertToDateTime($_.CreationTime).ToString('yyyy-MM-dd HH:mm') } }) | ConvertTo-Json -Compress", &Log(None), Duration::from_secs(60), &[]);
     if !o.ok {
         return Err(o.err);
     }
@@ -408,7 +537,7 @@ pub fn restore_points(cat: &Catalog) -> Result<Vec<(String, String)>, String> {
 pub fn create_restore_point(cat: &Catalog, log: &Log) -> Result<(), String> {
     let t0 = Instant::now();
     log.put("start", "Crear punto de restauración");
-    let o = run_ps(&cat.prelude, "Log 'Pidiéndole a Windows un punto de restauración (puede tardar un minuto)…'; Checkpoint-Computer -Description 'Botox Optimizer' -RestorePointType MODIFY_SETTINGS -WarningAction Stop; 'Punto de restauración creado'", log);
+    let o = run_ps_with(&cat.prelude, "Log 'Pidiéndole a Windows un punto de restauración (puede tardar un minuto)…'; Checkpoint-Computer -Description 'Botox Optimizer' -RestorePointType MODIFY_SETTINGS -WarningAction Stop; 'Punto de restauración creado'", log, Duration::from_secs(180), &[]);
     if o.ok {
         log.put("endok", format!("Listo en {} s", secs(t0)));
         Ok(())
@@ -419,7 +548,7 @@ pub fn create_restore_point(cat: &Catalog, log: &Log) -> Result<(), String> {
 }
 
 pub fn open_system_restore() {
-    let _ = Command::new(std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into()) + "\\System32\\rstrui.exe").spawn();
+    let _ = win::secure_command(win::system32_exe("rstrui.exe")).spawn();
 }
 
 /// Ids de tweaks con respaldo guardado y su fecha.
@@ -479,8 +608,36 @@ mod tests {
         assert_eq!(reg::get(KEY, "A").unwrap().0, json!(0));
         assert!(reg::get(KEY, "S").is_none());
 
+        // Un respaldo manipulado no puede escribir valores fuera del catálogo del tweak.
+        apply_native(&t, &log).unwrap();
+        let poisoned = json!([
+            { "p": KEY, "n": "A", "e": true, "v": 1, "t": "DWord" },
+            { "p": KEY, "n": "MAL", "e": true, "v": 1, "t": "DWord" }
+        ]);
+        std::fs::write(reg::backup_path("test-tweak"), format!("\u{feff}{poisoned}")).unwrap();
+        revert_native(&t, &log).unwrap();
+        assert_eq!(reg::get(KEY, "A").unwrap().0, json!(1), "las entradas válidas se restauran");
+        assert!(reg::get(KEY, "MAL").is_none(), "la entrada ajena se saltea");
+
+        // Un respaldo dañado no se borra ni se revierte a ciegas.
+        apply_native(&t, &log).unwrap();
+        std::fs::write(reg::backup_path("test-tweak"), "{ no es json").unwrap();
+        assert!(revert_native(&t, &log).is_err());
+        assert!(reg::backup_path("test-tweak").exists(), "el respaldo dañado queda en disco");
+        assert_eq!(reg::get(KEY, "A").unwrap().0, json!(5), "no se tocó nada");
+        let _ = std::fs::remove_file(reg::backup_path("test-tweak"));
+
         let _ = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER).delete_subkey_all(r"Software\BotoxOptimizerTest");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn un_tweak_sin_objetivos_no_figura_aplicado() {
+        let cat = Catalog::load();
+        let mut t = cat.tweaks.iter().find(|t| t.native).unwrap().clone();
+        t.pwr.clear();
+        t.reg = vec![RegEntry { p: r"HKLM:\SYSTEM\CurrentControlSet\Services\BotoxNoExiste".into(), n: "Start".into(), v: json!(4), t: "DWord".into(), def: json!(2), svc: true }];
+        assert!(!check_native(&t), "si el servicio no existe, no está aplicado");
     }
 
     #[test]

@@ -1,12 +1,10 @@
 //! Escáner de hardware nativo con WMI.
 //! Devuelve el mismo JSON que scan.js (el script de PowerShell), pero en una fracción de segundo.
 //! Solo lee: no cambia nada en la PC. Si WMI falla, la app cae al script de PowerShell.
-use crate::{engine::is_admin, reg};
+use crate::{engine::is_admin, reg, win};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::os::windows::process::CommandExt;
-use std::process::Command;
 use winreg::{enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE}, RegKey};
 use wmi::{Variant, WMIConnection};
 
@@ -153,7 +151,7 @@ fn power_plan() -> (String, String) {
 
 /// Versión del driver de NVIDIA como la informa nvidia-smi (el de WMI sale con otro formato).
 fn nvidia_driver() -> Option<String> {
-    let o = Command::new("nvidia-smi").args(["--query-gpu=driver_version", "--format=csv,noheader"]).creation_flags(0x0800_0000).output().ok()?;
+    let o = win::secure_command(win::nvidia_smi()?).args(["--query-gpu=driver_version", "--format=csv,noheader"]).output().ok()?;
     let line = String::from_utf8_lossy(&o.stdout).lines().next()?.trim().to_string();
     (o.status.success() && !line.is_empty()).then_some(line)
 }

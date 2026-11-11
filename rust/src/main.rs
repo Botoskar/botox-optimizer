@@ -4,10 +4,12 @@ mod engine;
 mod hwscan;
 mod pages;
 mod reg;
+mod sha256;
 mod startup;
 mod sys;
 mod theme;
 mod update;
+mod win;
 
 use catalog::{Catalog, Facts};
 use eframe::egui::{self, Align2, Color32, Pos2, Rect, RichText, Sense, Vec2};
@@ -62,6 +64,8 @@ pub enum Action {
     Reboot,
     RebootNow,
     Rescan,
+    /// Detiene los PowerShell en curso (chequeos, tweaks o limpiezas).
+    Cancel,
     CreateRestore,
     OpenRestore,
     RevertAll,
@@ -185,7 +189,7 @@ fn main() -> eframe::Result {
 }
 
 fn saved_path() -> std::path::PathBuf {
-    std::path::PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into())).join("BotoxOptimizer").join("state.json")
+    crate::win::local_app_data().join("BotoxOptimizer").join("state.json")
 }
 
 /// Imagen propia del usuario (reemplaza la del perro), ya recortada a 512×512.
@@ -233,11 +237,11 @@ impl App {
         let saved = load_saved();
         let mut app = Self {
             cat: Arc::new(Catalog::load()),
-            page: match std::env::var("BX_PAGE").as_deref() { Ok("scan") => Page::Scan, Ok("tweaks") => Page::Tweaks, Ok("debloat") => Page::Debloat, Ok("boost") => Page::Boost, Ok("backup") => Page::Backup, Ok("startup") => Page::Startup, _ => Page::Home },
+            page: match win::test_env("BX_PAGE").as_deref() { Some("scan") => Page::Scan, Some("tweaks") => Page::Tweaks, Some("debloat") => Page::Debloat, Some("boost") => Page::Boost, Some("backup") => Page::Backup, Some("startup") => Page::Startup, _ => Page::Home },
             startup: Vec::new(),
             update: None,
             updating: false,
-            tab: std::env::var("BX_TAB").unwrap_or_else(|_| "all".into()),
+            tab: win::test_env("BX_TAB").unwrap_or_else(|| "all".into()),
             query: String::new(),
             admin: engine::is_admin(),
             spec: None,
@@ -246,7 +250,7 @@ impl App {
             state: HashMap::new(),
             ps_ready: false,
             busy: HashSet::new(),
-            reboot_pending: std::env::var("BX_REBOOT").is_ok(), // BX_REBOOT=1: muestra el aviso, para capturas
+            reboot_pending: win::test_env("BX_REBOOT").is_some(), // BX_REBOOT=1: muestra el aviso, para capturas
             actions: vec![],
             confirm: None,
             confirm_skip: HashSet::new(),
@@ -309,7 +313,7 @@ impl App {
     }
 
     fn save(&self) {
-        if std::env::var("BX_SHOT").is_ok() {
+        if win::test_env("BX_SHOT").is_some() {
             return; // las capturas de prueba no tocan las preferencias del usuario
         }
         let p = saved_path();
@@ -434,7 +438,7 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
                 self.spawn(move |tx, _, _| { let _ = tx.send(Msg::Updated(update::install(&u))); });
             }
             Action::RebootNow => {
-                let _ = std::process::Command::new("shutdown.exe").args(["/r", "/t", "5"]).spawn();
+                let _ = win::secure_command(win::system32_exe("shutdown.exe")).args(["/r", "/t", "5"]).spawn();
                 self.toast("Reiniciando en 5 segundos…", ACCENT, 6.0);
             }
             Action::RunBoost(id) | Action::RunBoostNow(id) => {
@@ -449,6 +453,10 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
                 });
             }
             Action::Rescan => self.load_all(),
+            Action::Cancel => {
+                engine::cancel_all();
+                self.toast("Cancelando lo que está en curso…", ACCENT, 4.0);
+            }
             Action::CreateRestore => {
                 if self.need_admin() || self.busy.contains("rp") {
                     return;
@@ -550,7 +558,7 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
                 let log = engine::Log(Some(self.log_tx.clone()));
                 log.put("endok", "Versión nueva instalada: reabriendo");
                 App::save(self);
-                match std::env::current_exe().and_then(|exe| std::process::Command::new(exe).spawn()) {
+                match std::env::current_exe().and_then(|exe| win::secure_command(exe).spawn()) {
                     Ok(_) => std::process::exit(0),
                     Err(e) => {
                         self.updating = false;
@@ -832,6 +840,9 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
                     ui.ctx().copy_text(self.lines.iter().map(|l| format!("{} {}{}", l.t, plain(&l.lvl), l.msg)).collect::<Vec<_>>().join("\n"));
                     self.toast("Registro copiado al portapapeles", GREEN, 3.0);
                 }
+                if self.running > 0 && small(ui, "Cancelar").on_hover_text("Detener lo que está en curso").clicked() {
+                    self.actions.push(Action::Cancel);
+                }
                 if self.running > 0 {
                     let s = self.run_start.elapsed().as_secs();
                     ui.label(RichText::new(format!("{} {}:{:02}", ic::TIMER, s / 60, s % 60)).font(mono(12.5)).color(ACCENT));
@@ -987,17 +998,17 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
     /// Captura para pruebas: BX_SHOT=archivo.png guarda la ventana cuando terminó de cargar y cierra.
     /// BX_PAGE / BX_TAB eligen la pantalla; BX_DEMO=1 corre "Vaciar caché DNS" para ver la consola.
     fn shot(&mut self, ctx: &egui::Context) {
-        let Ok(path) = std::env::var("BX_SHOT") else { return };
+        let Some(path) = win::test_env("BX_SHOT") else { return };
         ctx.request_repaint();
         let ready = self.spec.is_some() && self.ps_ready && (self.page != Page::Backup || self.restore.is_some());
-        if ready && self.frames == 0 && std::env::var("BX_DEMO").is_ok() {
+        if ready && self.frames == 0 && win::test_env("BX_DEMO").is_some() {
             self.admin = true;
             self.saved.console_open = true;
             self.actions.push(Action::RunBoost("dns".into()));
             self.frames = 1;
         }
         // BX_CONFIRM=1: muestra la confirmación de "Activar … de bajo riesgo" con todos los tweaks (no aplica nada).
-        if ready && self.frames == 0 && self.confirm.is_none() && std::env::var("BX_CONFIRM").is_ok() {
+        if ready && self.frames == 0 && self.confirm.is_none() && win::test_env("BX_CONFIRM").is_some() {
             let ids = self.cat.tweaks.iter().filter(|t| t.risk == "low").map(|t| t.id.clone()).collect::<Vec<_>>();
             self.confirm_skip.extend(ids.iter().take(2).cloned()); // para ver casillas destildadas
             self.confirm = Some(Confirm { text: format!("Se van a activar {} optimizaciones.\n\nConviene crear antes un punto de restauración (sección Backups).\n\n¿Continuar?", ids.len()), action: Action::ManyNow(ids) });

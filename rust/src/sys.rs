@@ -1,9 +1,8 @@
 //! Datos de la PC: escáner de hardware, hallazgos y uso en vivo de CPU / RAM / GPU.
 use crate::catalog::{Catalog, Facts};
 use crate::engine::{run_ps, Log};
+use crate::win;
 use serde_json::Value;
-use std::os::windows::process::CommandExt;
-use std::process::Command;
 
 /// Escaneo de hardware: nativo con WMI; si WMI falla, cae al script de PowerShell (más lento, mismo resultado).
 pub fn scan(cat: &Catalog) -> Result<Value, String> {
@@ -31,7 +30,7 @@ pub fn facts(spec: &Value) -> Facts {
     let c_free = spec["vols"].as_array().and_then(|v| v.iter().find(|v| s(&v["letter"]) == sys)).map_or(999.0, |v| n(&v["freeGB"]));
     Facts {
         ram_gb: n(&spec["ram"]["gb"]) as u32,
-        laptop: spec["laptop"].as_bool().unwrap_or(false) || std::env::var("BX_LAPTOP").as_deref() == Ok("1"), // BX_LAPTOP=1: simula notebook
+        laptop: spec["laptop"].as_bool().unwrap_or(false) || win::test_env("BX_LAPTOP").as_deref() == Some("1"), // BX_LAPTOP=1: simula notebook
         c_free_gb: c_free as u32,
         gpu_vendor: if gpu.contains("nvidia") { "NVIDIA" } else if gpu.contains("amd") || gpu.contains("radeon") { "AMD" } else if gpu.contains("intel") { "Intel" } else { "" }.into(),
         sys_disk_ssd: sys_disk.is_some_and(|d| s(&d["media"]).to_lowercase().contains("ssd") || s(&d["bus"]).to_lowercase().contains("nvme")),
@@ -205,16 +204,17 @@ pub fn stats(prev: (u64, u64)) -> (Stats, (u64, u64)) {
     let cpu = (prev.1 > 0 && total > 0).then(|| (100.0 * (1.0 - idle as f64 / total as f64)).round().clamp(0.0, 100.0) as u32);
     let mut m = MemoryStatusEx { len: std::mem::size_of::<MemoryStatusEx>() as u32, load: 0, total: 0, avail: 0, _rest: [0; 5] };
     unsafe { GlobalMemoryStatusEx(&mut m) };
-    let gpu = Command::new("nvidia-smi")
-        .args(["--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu", "--format=csv,noheader,nounits"])
-        .creation_flags(0x0800_0000)
-        .output()
-        .ok()
-        .and_then(|o| {
-            let text = String::from_utf8_lossy(&o.stdout).into_owned();
-            let v: Vec<f32> = text.lines().next()?.split(',').filter_map(|x| x.trim().parse().ok()).collect();
-            (v.len() == 4 && v[2] > 0.0).then(|| (v[0] as u32, (100.0 * v[1] / v[2]).round() as u32, v[3] as u32))
-        });
+    let gpu = win::nvidia_smi().and_then(|exe| {
+        win::secure_command(exe)
+            .args(["--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu", "--format=csv,noheader,nounits"])
+            .output()
+            .ok()
+            .and_then(|o| {
+                let text = String::from_utf8_lossy(&o.stdout).into_owned();
+                let v: Vec<f32> = text.lines().next()?.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                (v.len() == 4 && v[2] > 0.0).then(|| (v[0] as u32, (100.0 * v[1] / v[2]).round() as u32, v[3] as u32))
+            })
+    });
     (Stats { cpu, ram: m.load, ram_used_gb: (m.total - m.avail) as f32 / (1u64 << 30) as f32, gpu }, now)
 }
 

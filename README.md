@@ -15,7 +15,7 @@ El toolchain (Rust + mingw64) está en `M:\Github Things\botox-optimizer-rust` y
 ```bash
 cd rust
 cmd //c ".\\cargo.cmd build"                         # desarrollo, sin admin (modo solo lectura)
-cmd //c ".\\cargo.cmd test"                          # 31 tests
+cmd //c ".\\cargo.cmd test"                          # 40 tests
 BX_ADMIN=1 cmd //c ".\\cargo.cmd build --release"    # versión para usar: pide administrador
 ```
 
@@ -23,16 +23,24 @@ Si la app está abierta, el `.exe` queda bloqueado: por eso se usa una copia en 
 
 ## Sacar una versión nueva
 
-La app busca sola, al abrir, la última versión en `botox-optimizer-releases` y ofrece un botón "Actualizar". No lleva ninguna clave: el repo de versiones es público y el código de este repo es privado.
+La app busca sola, al abrir, la última versión en `botox-optimizer-releases` y ofrece un botón "Actualizar". No lleva ninguna clave: el repo de versiones es público y solo trae el `.exe`; el código fuente está en este repositorio.
 
 1. Subí la versión en `rust/Cargo.toml` y compilá la versión con admin (arriba).
 2. Copiá el `.exe` como **`BotoxOptimizer.exe`** (sin espacios: la app busca ese nombre) y sacá su hash: `Get-FileHash BotoxOptimizer.exe`.
-3. En `botox-optimizer-releases` > Releases > Draft a new release:
+3. Firmá el `.exe` con Authenticode (`signtool sign /fd SHA256 ...`) y comprobá con `Get-AuthenticodeSignature .\BotoxOptimizer.exe` que diga `Valid`. La versión de release no instala un archivo sin firma válida; usá un certificado de una CA en la que confíen las PCs (o instalá la raíz en ellas).
+4. En `botox-optimizer-releases` > Releases > Draft a new release:
    - Tag `vX.Y.Z` (igual a la versión de `Cargo.toml`).
-   - En la descripción, una línea `SHA256: <hash>`. La app no instala si el hash no coincide.
+   - En la descripción, una línea `SHA256: <hash>`. La app no instala si el hash no coincide (también se compara con el digest del asset que publica GitHub).
    - Adjuntá `BotoxOptimizer.exe` y publicá (no como pre-release: la app mira solo la última publicada).
 
 Las versiones anteriores a 2.1.0 no saben actualizarse: hay que pasarles el `.exe` una vez.
+
+## Notas de seguridad
+
+- Los hijos elevados (PowerShell, `sc`, `powercfg`, `shutdown`, `rstrui`, `nvidia-smi`) se lanzan por ruta absoluta desde `System32` y con un entorno saneado: no se confía en `PATH`, `TEMP`, `SystemRoot` ni en el directorio actual.
+- Los respaldos van a `%ProgramData%\BotoxOptimizer\backup` con ACL solo para SYSTEM/Administradores y se validan contra el catálogo antes de revertir (una entrada ajena se saltea). El respaldo se borra recién cuando la reversión terminó bien.
+- `BX_SHOT`, `BX_PAGE`, `BX_TAB`, `BX_DEMO`, `BX_CONFIRM`, `BX_REBOOT`, `BX_LAPTOP`, `BX_UPDATE_API` y `BX_BACKUP_DIR` solo se leen en builds de desarrollo. El `.exe` de release los ignora.
+- La actualización verifica el SHA256 en el mismo proceso que instala y, en release, exige una firma Authenticode válida.
 
 ## Agregar un tweak
 
