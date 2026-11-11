@@ -18,27 +18,34 @@ pub fn report(spec: Option<&Value>, admin: bool, fake: Option<&str>, lines: &[St
     out.push(format!("Administrador: {}", if admin { "sí" } else { "no" }));
     out.push(format!("Modo prueba: {}", fake.unwrap_or("no")));
     out.push(String::new());
-    out.extend(lines.iter().cloned());
-    let mut text = out.join("\n");
-    // Sin datos que identifiquen a la persona. Nombres vacíos o muy cortos no se reemplazan (taparían letras sueltas).
-    for (secret, mask) in [(profile, "%USERPROFILE%"), (host, "<PC>")] {
+    // Sin datos que identifiquen a la persona, en el registro (el encabezado no los tiene y lleva el nombre de la app).
+    // Nombres vacíos o muy cortos no se reemplazan (taparían letras sueltas). El de la PC, solo como palabra entera:
+    // una PC que se llama "Botox" no debe tapar "BotoxOptimizer".
+    let mut log = lines.join("\n");
+    for (secret, mask, word) in [(profile, "%USERPROFILE%", false), (host, "<PC>", true)] {
         if secret.len() >= 3 {
-            text = replace_ci(&text, secret, mask);
+            log = replace_ci(&log, secret, mask, word);
         }
     }
-    format!("```\n{text}\n```")
+    out.push(log);
+    format!("```\n{}\n```", out.join("\n"))
 }
 
 /// Reemplazo sin distinguir mayúsculas (Windows escribe la misma ruta de las dos formas).
-fn replace_ci(text: &str, from: &str, to: &str) -> String {
-    let (lower, needle) = (text.to_lowercase(), from.to_lowercase());
-    // to_lowercase puede cambiar el largo de letras raras: si pasa, se reemplaza solo lo exacto.
-    if lower.len() != text.len() {
-        return text.replace(from, to);
-    }
+/// `word`: solo donde no lo rodean letras ni números.
+fn replace_ci(text: &str, from: &str, to: &str, word: bool) -> String {
+    // to_lowercase puede cambiar el largo de letras raras: si pasa, se busca solo lo exacto.
+    let (lower, needle) = match (text.to_lowercase(), from.to_lowercase()) {
+        (l, n) if l.len() == text.len() && n.len() == from.len() => (l, n),
+        _ => (text.to_string(), from.to_string()),
+    };
+    let alnum = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric());
     let mut out = String::with_capacity(text.len());
     let mut last = 0;
     for (i, _) in lower.match_indices(&needle) {
+        if i < last || word && (alnum(text[..i].chars().next_back()) || alnum(text[i + needle.len()..].chars().next())) {
+            continue;
+        }
         out.push_str(&text[last..i]);
         out.push_str(to);
         last = i + needle.len();
@@ -78,6 +85,10 @@ mod tests {
             assert!(r.contains(want), "falta {want:?} en:\n{r}");
         }
         assert!(!r.to_lowercase().contains("juan"), "{r}");
+        // Una PC que se llama como la app: se tapa el nombre suelto, no la marca ni sus rutas.
+        let lines = vec![r"ERROR C:\ProgramData\BotoxOptimizer\backup\x.json en botox".to_string()];
+        let r = report(None, true, None, &lines, r"C:\Users\Botox", "BOTOX");
+        assert!(r.starts_with("```\nBotox Optimizer ") && r.contains(r"C:\ProgramData\BotoxOptimizer\backup") && r.contains("en <PC>"), "{r}");
         // Sin escaneo todavía, igual sale el encabezado.
         assert!(report(None, false, Some("amd"), &[], "", "").contains("Modo prueba: amd"));
     }

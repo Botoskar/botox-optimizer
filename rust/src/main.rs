@@ -237,9 +237,6 @@ fn main() -> eframe::Result {
         }
         // Restaura la versión anterior si la nueva no llegó a arrancar bien (puede no volver: abre la vieja y sale).
         update::on_start();
-        // Repara los permisos de los respaldos que dejaron versiones anteriores. Si falla, cada respaldo ilegible lo
-        // dice en la consola al usarlo.
-        let _ = reg::repair_backups();
     }
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).expect("icono");
     let saved = load_saved();
@@ -473,6 +470,14 @@ impl App {
         };
         if app.safe {
             app.page = Page::Backup;
+        }
+        // Repara los permisos de los respaldos que dejaron versiones anteriores, y lo dice en la consola.
+        if !is_test_copy() && app.admin && reg::backup_dir().exists() {
+            let log = Log(Some(app.log_tx.clone()));
+            match reg::repair_backups() {
+                Ok(()) => log.put("info", "Permisos de la carpeta de respaldos verificados"),
+                Err(e) => log.put("err", format!("No se pudieron reparar los permisos de los respaldos: {e}")),
+            }
         }
         app.load_all();
         // Arranque instantáneo: muestra lo último que se supo de la PC; los datos frescos llegan en segundos.
