@@ -119,9 +119,48 @@ impl Tweak {
     pub fn reason(&self, f: &Facts) -> String { self.why.as_deref().map(|s| why(s, f)).unwrap_or_default() }
 }
 
+/// "Optimizar para juegos": las recomendadas para esta PC que se **sabe** que están apagadas (con el estado sin leer,
+/// aplicarlas de nuevo guardaría como respaldo los valores ya cambiados). Sin debloat ni las de notebook en una PC de
+/// escritorio. Las de riesgo medio, solo si se piden.
+pub fn one_click_ids(cat: &Catalog, f: &Facts, state: &std::collections::HashMap<String, bool>, medium: bool) -> Vec<String> {
+    cat.tweaks
+        .iter()
+        .filter(|t| (t.cat != "laptop" || f.laptop) && !t.debloat && t.recommended(f) && state.get(&t.id) == Some(&false) && (t.risk == "low" || medium))
+        .map(|t| t.id.clone())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn un_clic_elige_recomendadas_apagadas_de_bajo_riesgo() {
+        let c = Catalog::load();
+        let f = Facts { ram_gb: 32, gpu_vendor: "NVIDIA".into(), sys_disk_ssd: true, ..Default::default() };
+        let all_off: std::collections::HashMap<String, bool> = c.tweaks.iter().map(|t| (t.id.clone(), false)).collect();
+        let low = one_click_ids(&c, &f, &all_off, false);
+        assert!(!low.is_empty());
+        for id in &low {
+            let t = c.tweak(id).unwrap();
+            assert!(t.risk == "low" && t.recommended(&f) && !t.debloat && t.cat != "laptop", "{id}");
+        }
+        // Toda recomendada de bajo riesgo que corresponde está incluida.
+        let expected = c.tweaks.iter().filter(|t| t.risk == "low" && t.recommended(&f) && !t.debloat && t.cat != "laptop").count();
+        assert_eq!(low.len(), expected);
+        // Con riesgo medio se suman, sin perder las de bajo.
+        let with_medium = one_click_ids(&c, &f, &all_off, true);
+        assert!(with_medium.len() >= low.len() && low.iter().all(|id| with_medium.contains(id)));
+        // Estado desconocido o ya activo: no se toca.
+        assert!(one_click_ids(&c, &f, &Default::default(), true).is_empty());
+        let mut one_on = all_off.clone();
+        one_on.insert(low[0].clone(), true);
+        assert!(!one_click_ids(&c, &f, &one_on, false).contains(&low[0]));
+        // En una notebook sí entran las de su categoría.
+        let lap = Facts { laptop: true, ..f.clone() };
+        let lap_ids = one_click_ids(&c, &lap, &all_off, false);
+        assert!(c.tweaks.iter().filter(|t| t.cat == "laptop" && t.risk == "low" && t.recommended(&lap)).all(|t| lap_ids.contains(&t.id)));
+    }
 
     #[test]
     fn catalogo_completo_y_portado() {

@@ -150,6 +150,8 @@ pub struct App {
     page_at: Instant,
     /// Ctrl+F: enfocar el buscador cuando se dibuje.
     pub focus_search: bool,
+    /// "Optimizar para juegos" incluye también las de riesgo medio (casilla en Inicio).
+    pub one_click_medium: bool,
 }
 
 fn main() -> eframe::Result {
@@ -346,6 +348,7 @@ impl App {
             frames: 0,
             page_at: Instant::now(),
             focus_search: false,
+            one_click_medium: false,
         };
         app.load_all();
         // Arranque instantáneo: muestra lo último que se supo de la PC; los datos frescos llegan en segundos.
@@ -581,10 +584,10 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
             Msg::States { map, ps } => {
                 self.state.extend(map);
                 self.ps_ready |= ps;
-                if ps {
-                    self.saved.state = self.state.clone();
-                    self.save();
-                }
+                // También la tanda rápida: si se cierra antes de que llegue la de PowerShell, el próximo arranque
+                // muestra igual los estados nativos frescos.
+                self.saved.state = self.state.clone();
+                self.save();
             }
             Msg::Toggled { id, on, done, quiet } => {
                 self.busy.remove(&id);

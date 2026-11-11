@@ -299,6 +299,8 @@ impl App {
                 chip(ui, "C:", &format!("{} GB libres", f.c_free_gb));
             });
             ui.add_space(10.0);
+            self.one_click(ui, &f, &spec);
+            ui.add_space(10.0);
             let st = self.stats.clone();
             columns(ui, 3, 12.0, |c| {
                 let stat = |ui: &mut Ui, label: &str, pct: Option<u32>, color: Color32, value: String| {
@@ -365,14 +367,10 @@ impl App {
                     self.row(ui, t, true);
                 }
                 ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    if !pending.is_empty() && button(ui, &format!("Aplicar las {} recomendadas", pending.len()), Btn::Primary).clicked() {
-                        self.actions.push(Action::Many(pending.iter().map(|t| t.id.clone()).collect(), "aplicar"));
-                    }
-                    if button(ui, "Ver todas", Btn::Ghost).clicked() {
-                        self.actions.push(Action::Go(Page::Tweaks, Some("rec")));
-                    }
-                });
+                // Aplicarlas en lote es el botón "Optimizar para juegos" de la izquierda (una sola selección, con sus reglas).
+                if button(ui, "Ver todas", Btn::Ghost).clicked() {
+                    self.actions.push(Action::Go(Page::Tweaks, Some("rec")));
+                }
             });
             ui.add_space(12.0);
             title(ui, "Atajos");
@@ -390,6 +388,32 @@ impl App {
                     }
                 }
             });
+        });
+    }
+
+    /// Botón principal de Inicio: aplica en un paso las recomendadas de bajo riesgo (o también las de riesgo medio),
+    /// pasando por la confirmación de lote de siempre, donde se puede destildar cada una.
+    fn one_click(&mut self, ui: &mut Ui, f: &crate::catalog::Facts, spec: &Value) {
+        let ids = crate::catalog::one_click_ids(&self.cat, f, &self.state, self.one_click_medium);
+        let ready = self.ps_ready;
+        let label = if !ready { "Leyendo el estado de tu PC…".to_string() } else if ids.is_empty() { "Tu PC ya está optimizada".to_string() } else { format!("{}  Optimizar para juegos", ic::LIGHTNING) };
+        ui.add_enabled_ui(ready && !ids.is_empty(), |ui| {
+            ui.spacing_mut().button_padding = Vec2::new(24.0, 12.0);
+            let b = egui::Button::new(RichText::new(label).font(semi(16.0)).color(Color32::WHITE)).fill(ACCENT).corner_radius(12).min_size(Vec2::new(ui.available_width(), 50.0));
+            if ui.add(b).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                self.actions.push(Action::Many(ids.clone(), "aplicar"));
+            }
+        });
+        if ready && !ids.is_empty() {
+            let gpu = s(&sys::main_gpu(spec)["name"]).to_string();
+            let what = if self.one_click_medium { "ajustes recomendados" } else { "ajustes seguros" };
+            ui.label(muted(format!("Aplica {} {what} para tu {} con {}. Antes de aplicar podés revisar la lista.", ids.len(), cpu_short(s(&spec["cpu"]["name"])), if gpu.is_empty() { "tu placa de video".into() } else { gpu })));
+        }
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.one_click_medium, RichText::new("Incluir también las de riesgo medio").size(13.0).color(MUTED));
+            if self.one_click_medium {
+                ui.label(RichText::new(format!("{} Pueden tener efectos secundarios: leé cada una antes de confirmar.", ic::WARNING)).size(12.5).color(YELLOW));
+            }
         });
     }
 
@@ -656,6 +680,10 @@ impl App {
     fn boost_page(&mut self, ui: &mut Ui) {
         header(ui, "Boost-Up", "Limpiezas y mantenimiento para correr cada tanto", |_| {});
         let cat = self.cat.clone();
+        if cat.boosts.is_empty() {
+            ui.label(muted("No hay limpiezas configuradas."));
+            return;
+        }
         columns(ui, 2, 22.0, |c| {
             let ui = &mut c[0];
             for (i, b) in cat.boosts.iter().enumerate() {
