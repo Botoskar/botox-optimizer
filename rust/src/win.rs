@@ -175,7 +175,7 @@ pub fn secure_command(exe: impl AsRef<Path>) -> Command {
     c.env("PATH", path);
     c.env("PSModulePath", modules);
     // Los hooks de prueba no deben llegar a un hijo elevado.
-    for k in ["BX_UPDATE_API", "BX_BACKUP_DIR", "BX_SHOT", "BX_DEMO", "BX_CONFIRM", "BX_PAGE", "BX_TAB", "BX_REBOOT", "BX_LAPTOP", "BX_FAKE"] {
+    for k in ["BX_UPDATE_API", "BX_BACKUP_DIR", "BX_SHOT", "BX_DEMO", "BX_CONFIRM", "BX_PAGE", "BX_TAB", "BX_REBOOT", "BX_LAPTOP", "BX_FAKE", "BX_UNDO"] {
         c.env_remove(k);
     }
     c

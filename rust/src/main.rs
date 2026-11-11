@@ -79,6 +79,9 @@ pub enum Action {
 
 pub struct Confirm { pub text: String, pub action: Action }
 
+/// Aviso abajo a la derecha. `undo`: botón "Deshacer" que vuelve atrás el cambio recién hecho.
+struct Toast { msg: String, color: Color32, at: Instant, secs: f32, undo: Option<Action> }
+
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 #[serde(default)]
 struct Saved {
@@ -130,7 +133,7 @@ pub struct App {
     lines: Vec<Line>,
     running: u32,
     run_start: Instant,
-    toasts: Vec<(String, Color32, Instant, f32)>,
+    toasts: Vec<Toast>,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
     log_tx: Sender<Line>,
@@ -228,6 +231,14 @@ fn install_panic_log() {
         let _ = file.and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()));
         prev(info);
     }));
+}
+
+/// Ícono y texto de un aviso en un solo bloque: un layout horizontal acá se estira a toda la altura.
+fn toast_text(ui: &mut egui::Ui, icon: &str, t: &Toast) {
+    let mut job = egui::text::LayoutJob::default();
+    job.append(icon, 0.0, egui::TextFormat { font_id: regular(15.0), color: t.color, ..Default::default() });
+    job.append(&t.msg, 9.0, egui::TextFormat { font_id: regular(13.5), color: TEXT, ..Default::default() });
+    ui.add(egui::Label::new(job).wrap());
 }
 
 fn saved_path() -> std::path::PathBuf {
@@ -393,7 +404,7 @@ impl App {
         }
     }
 
-    pub fn toast(&mut self, msg: impl Into<String>, color: Color32, secs: f32) { self.toasts.push((msg.into(), color, Instant::now(), secs)); }
+    pub fn toast(&mut self, msg: impl Into<String>, color: Color32, secs: f32) { self.toasts.push(Toast { msg: msg.into(), color, at: Instant::now(), secs, undo: None }); }
     pub fn on(&self, id: &str) -> bool { self.state.get(id).copied().unwrap_or(false) }
     pub fn boost_last(&self, id: &str) -> Option<u64> { self.saved.boost_last.get(id).copied() }
     pub fn applied(&self) -> &HashSet<String> { &self.saved.applied }
@@ -609,7 +620,11 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
                     self.toast(format!("{}: se ejecutó pero Windows no refleja el cambio todavía (puede requerir reinicio).", t.name), ACCENT, 7.0);
                 } else if !quiet {
                     let reboot = if t.reboot && on { " · requiere reiniciar" } else { "" };
-                    self.toast(format!("{}: {}{reboot}", if on { "Activado" } else { "Revertido" }, t.name), if on { GREEN } else { ACCENT }, 4.5);
+                    // Deshacer = el mismo interruptor otra vez (Toggle, no ToggleNow: volver a aplicar uno de riesgo
+                    // medio sigue pidiendo confirmación). Solo si quedó como se pidió; si no, iría para el lado equivocado.
+                    let msg = format!("{}: {}{reboot}", if on { "Activado" } else { "Revertido" }, t.name);
+                    let secs = if t.risk == "low" { 8.0 } else { 12.0 };
+                    self.toasts.push(Toast { msg, color: if on { GREEN } else { ACCENT }, at: Instant::now(), secs, undo: Some(Action::Toggle(id.clone())) });
                 }
                 if self.page == Page::Backup {
                     self.backups = engine::backups();
@@ -957,29 +972,47 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
 
     fn overlays(&mut self, ctx: &egui::Context) {
         // Avisos abajo a la derecha.
-        self.toasts.retain(|t| t.2.elapsed().as_secs_f32() < t.3);
+        self.toasts.retain(|t| t.at.elapsed().as_secs_f32() < t.secs);
         let mut bottom = if self.saved.console_open { 300.0 } else { 52.0 };
+        let mut undone = None;
         // Un Area por aviso, apilados de abajo hacia arriba. Un Area, aunque no sea interactivo, tapa los clics de todo
-        // lo que queda debajo de su rectángulo: con uno solo en bottom_up ocupaba la columna derecha entera.
-        for (i, (msg, color, at, secs)) in self.toasts.iter().rev().enumerate() {
-            let shown = egui::Area::new(egui::Id::new(("toast", i))).anchor(egui::Align2::RIGHT_BOTTOM, [-22.0, -bottom]).interactable(false).show(ctx, |ui| {
+        // lo que queda debajo de su rectángulo: con uno solo en bottom_up ocupaba la columna derecha entera. Solo los
+        // que traen "Deshacer" reciben clics, y solo en su propio rectángulo.
+        let n = self.toasts.len();
+        for (i, t) in self.toasts.iter().rev().enumerate() {
+            let shown = egui::Area::new(egui::Id::new(("toast", i))).anchor(egui::Align2::RIGHT_BOTTOM, [-22.0, -bottom]).interactable(t.undo.is_some()).show(ctx, |ui| {
                 // Aparece y se va con un fundido corto.
-                let age = at.elapsed().as_secs_f32();
-                let alpha = (age / 0.15).min(1.0).min((secs - age) / 0.4).clamp(0.0, 1.0);
-                let icon = if *color == GREEN { ic::CHECK_CIRCLE } else if *color == RED { ic::WARNING_CIRCLE } else { ic::INFO };
+                let age = t.at.elapsed().as_secs_f32();
+                let alpha = (age / 0.15).min(1.0).min((t.secs - age) / 0.4).clamp(0.0, 1.0);
+                let icon = if t.color == GREEN { ic::CHECK_CIRCLE } else if t.color == RED { ic::WARNING_CIRCLE } else { ic::INFO };
                 ui.multiply_opacity(alpha);
                 let r = egui::Frame::new().fill(Color32::from_rgb(27, 36, 67)).stroke(egui::Stroke::new(1.0_f32, LINE)).corner_radius(10).inner_margin(egui::Margin { left: 18, right: 16, top: 12, bottom: 12 }).show(ui, |ui| {
-                    ui.set_max_width(420.0);
-                    // Ícono y texto en un solo bloque: un layout horizontal acá se estira a toda la altura.
-                    let mut job = egui::text::LayoutJob::default();
-                    job.append(icon, 0.0, egui::TextFormat { font_id: regular(15.0), color: *color, ..Default::default() });
-                    job.append(msg, 9.0, egui::TextFormat { font_id: regular(13.5), color: TEXT, ..Default::default() });
-                    ui.add(egui::Label::new(job).wrap());
+                    ui.set_max_width(if t.undo.is_some() { 500.0 } else { 420.0 });
+                    ui.horizontal(|ui| {
+                        if t.undo.is_some() {
+                            // El botón primero (a la derecha) y el texto en lo que sobra.
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.spacing_mut().button_padding = Vec2::new(12.0, 4.0);
+                                let b = egui::Button::new(RichText::new("Deshacer").font(semi(13.0)).color(ACCENT)).fill(CARD2).stroke(egui::Stroke::new(1.0_f32, LINE)).corner_radius(8);
+                                if ui.add(b).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                    undone = Some(n - 1 - i);
+                                }
+                                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| toast_text(ui, icon, t));
+                            });
+                        } else {
+                            toast_text(ui, icon, t);
+                        }
+                    });
                 });
                 let bar = Rect::from_min_size(r.response.rect.min, Vec2::new(4.0, r.response.rect.height()));
-                ui.painter().rect_filled(bar, egui::CornerRadius { nw: 10, sw: 10, ne: 0, se: 0 }, *color);
+                ui.painter().rect_filled(bar, egui::CornerRadius { nw: 10, sw: 10, ne: 0, se: 0 }, t.color);
             });
             bottom += shown.response.rect.height() + 8.0;
+        }
+        if let Some(i) = undone {
+            if let Some(a) = self.toasts.remove(i).undo {
+                self.actions.push(a);
+            }
         }
         // Confirmación.
         let mut answer = None;
@@ -1092,6 +1125,12 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
             let ids = self.cat.tweaks.iter().filter(|t| t.risk == "low").map(|t| t.id.clone()).collect::<Vec<_>>();
             self.confirm_skip.extend(ids.iter().take(2).cloned()); // para ver casillas destildadas
             self.confirm = Some(Confirm { text: format!("Se van a activar {} optimizaciones.\n\nConviene crear antes un punto de restauración (sección Backups).\n\n¿Continuar?", ids.len()), action: Action::ManyNow(ids) });
+        }
+        // BX_UNDO=1: muestra el aviso de un cambio con su botón "Deshacer" (no aplica nada).
+        if ready && self.frames == 0 && self.toasts.is_empty() && win::test_env("BX_UNDO").is_some() {
+            let id = self.cat.tweaks[0].id.clone();
+            let msg = format!("Activado: {}", self.cat.tweaks[0].name);
+            self.toasts.push(Toast { msg, color: GREEN, at: Instant::now(), secs: 60.0, undo: Some(Action::Toggle(id)) });
         }
         if ready && self.busy.is_empty() {
             self.frames += 1;
