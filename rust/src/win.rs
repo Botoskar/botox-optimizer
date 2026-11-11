@@ -196,11 +196,53 @@ pub fn is_reparse_point(p: &Path) -> bool {
     std::fs::symlink_metadata(p).map(|m| m.file_attributes() & 0x0000_0400 != 0).unwrap_or(false)
 }
 
+#[link(name = "advapi32")]
+extern "system" {
+    fn GetNamedSecurityInfoW(name: *const u16, obj: u32, info: u32, owner: *mut *mut c_void, group: *mut *mut c_void, dacl: *mut *mut c_void, sacl: *mut *mut c_void, sd: *mut *mut c_void) -> u32;
+    fn IsWellKnownSid(sid: *mut c_void, kind: u32) -> i32;
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn LocalFree(p: *mut c_void) -> *mut c_void;
+}
+
+/// true si el dueño del archivo o carpeta es SYSTEM o Administradores.
+/// `icacls /grant:r` no cambia el dueño, y el dueño siempre puede volver a darse permisos: una carpeta que creó
+/// un usuario normal (ProgramData lo deja) no sirve para lo que después se ejecuta o se aplica elevado.
+pub fn owner_is_admin(p: &Path) -> Result<bool, String> {
+    let wide: Vec<u16> = p.as_os_str().encode_wide().chain([0]).collect();
+    let (mut owner, mut sd) = (std::ptr::null_mut(), std::ptr::null_mut());
+    // 1 = SE_FILE_OBJECT, 1 = OWNER_SECURITY_INFORMATION
+    let err = unsafe { GetNamedSecurityInfoW(wide.as_ptr(), 1, 1, &mut owner, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), &mut sd) };
+    if err != 0 {
+        return Err(format!("no se pudo leer el dueño de {} (error {err})", p.display()));
+    }
+    // 22 = WinLocalSystemSid, 26 = WinBuiltinAdministratorsSid
+    let ok = !owner.is_null() && unsafe { IsWellKnownSid(owner, 22) != 0 || IsWellKnownSid(owner, 26) != 0 };
+    unsafe { LocalFree(sd) };
+    Ok(ok)
+}
+
+/// Exige que `p` sea de SYSTEM/Administradores y no sea un enlace. Para usar antes de escribir o aplicar algo elevado.
+pub fn require_admin_owned(p: &Path) -> Result<(), String> {
+    if is_reparse_point(p) {
+        return Err(format!("{} es un enlace/reparse point: no se usa por seguridad", p.display()));
+    }
+    match owner_is_admin(p)? {
+        true => Ok(()),
+        false => Err(format!("{} no pertenece a SYSTEM ni a Administradores (lo creó otro usuario): no se usa por seguridad", p.display())),
+    }
+}
+
 /// Deja una carpeta solo para SYSTEM y Administradores (sin herencia). La usan los respaldos.
+/// Primero exige que la carpeta ya sea de un administrador: si no, los permisos se podrían volver a abrir.
 pub fn harden_dir(dir: &Path) -> Result<(), String> {
+    require_admin_owned(dir)?;
+    // Sin /C: si falla en un archivo de adentro, icacls corta y devuelve error en vez de seguir.
     let out = secure_command(system32_exe("icacls.exe"))
         .arg(dir.as_os_str())
-        .args(["/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "/T", "/C", "/Q"])
+        .args(["/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "/T", "/Q"])
         .output()
         .map_err(|e| format!("no se pudo ejecutar icacls: {e}"))?;
     if !out.status.success() {
@@ -225,6 +267,8 @@ pub fn script_dir() -> Result<PathBuf, String> {
             }
         }
         if admin {
+            // El dueño de la carpeta padre podría renombrar `tmp` y poner otra en su lugar: también tiene que ser de un admin.
+            require_admin_owned(&root)?;
             harden_dir(&dir)?;
         }
         Ok(dir)
@@ -233,8 +277,8 @@ pub fn script_dir() -> Result<PathBuf, String> {
 }
 
 // ── Firma Authenticode ──
-// WinVerifyTrust valida la cadena y la firma incrustada. No fija el emisor todavía: si más adelante
-// se quiere exigir un certificado concreto, hay que comparar el thumbprint del firmante.
+// WinVerifyTrust valida la cadena y la firma incrustada; `authenticode_signer` además devuelve el thumbprint del
+// firmante, que el actualizador compara con los fijados (publisher pinning).
 
 #[repr(C)]
 struct FileInfo {
@@ -266,21 +310,37 @@ const ACTION_GENERIC_VERIFY_V2: Guid = Guid { a: 0x00AA_C56B, b: 0xCD44, c: 0x11
 #[link(name = "wintrust")]
 extern "system" {
     fn WinVerifyTrust(hwnd: isize, action: *const Guid, data: *mut c_void) -> i32;
+    fn WTHelperProvDataFromStateData(state: isize) -> *mut c_void;
+    fn WTHelperGetProvSignerFromChain(prov: *mut c_void, signer: u32, counter: i32, counter_idx: u32) -> *mut c_void;
+    fn WTHelperGetProvCertFromChain(signer: *mut c_void, cert: u32) -> *mut ProviderCert;
 }
 
-/// Ok si el archivo tiene una firma Authenticode válida y la cadena es de confianza.
-pub fn verify_authenticode(path: &Path) -> Result<(), String> {
+#[link(name = "crypt32")]
+extern "system" {
+    fn CertGetCertificateContextProperty(cert: *const c_void, prop: u32, data: *mut u8, len: *mut u32) -> i32;
+}
+
+/// Comienzo de CRYPT_PROVIDER_CERT: solo hace falta el puntero al certificado.
+#[repr(C)]
+struct ProviderCert {
+    cb_struct: u32,
+    cert: *const c_void,
+}
+
+/// Verifica la firma Authenticode (cadena de confianza incluida) y devuelve el thumbprint SHA-1 del certificado
+/// firmante, en hexadecimal mayúscula, para compararlo con los fijados en `update.rs`.
+pub fn authenticode_signer(path: &Path) -> Result<String, String> {
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
     let mut fi = FileInfo { cb_struct: std::mem::size_of::<FileInfo>() as u32, file_path: wide.as_ptr(), file_handle: 0, known_subject: std::ptr::null() };
     let mut td = TrustData {
         cb_struct: std::mem::size_of::<TrustData>() as u32,
         policy_callback: std::ptr::null_mut(),
         sip_client: std::ptr::null_mut(),
-        ui_choice: 2,          // WTD_UI_NONE
-        revocation_checks: 0,  // WTD_REVOKE_NONE (sin red: no colgar la actualización)
-        union_choice: 1,       // WTD_CHOICE_FILE
+        ui_choice: 2,         // WTD_UI_NONE
+        revocation_checks: 0, // WTD_REVOKE_NONE (sin red: no colgar la actualización)
+        union_choice: 1,      // WTD_CHOICE_FILE
         file: &mut fi as *mut FileInfo,
-        state_action: 0,       // WTD_STATEACTION_VERIFY
+        state_action: 1, // WTD_STATEACTION_VERIFY: guarda el estado para leer el firmante (se cierra abajo)
         state_data: 0,
         url_reference: std::ptr::null(),
         prov_flags: 0x0000_0010, // WTD_REVOCATION_CHECK_NONE
@@ -288,9 +348,67 @@ pub fn verify_authenticode(path: &Path) -> Result<(), String> {
         signature_settings: std::ptr::null_mut(),
     };
     let hr = unsafe { WinVerifyTrust(0, &ACTION_GENERIC_VERIFY_V2, &mut td as *mut TrustData as *mut c_void) };
+    let thumb = (hr == 0).then(|| unsafe {
+        let prov = WTHelperProvDataFromStateData(td.state_data);
+        let signer = if prov.is_null() { std::ptr::null_mut() } else { WTHelperGetProvSignerFromChain(prov, 0, 0, 0) };
+        let cert = if signer.is_null() { std::ptr::null_mut() } else { WTHelperGetProvCertFromChain(signer, 0) };
+        if cert.is_null() || (*cert).cert.is_null() {
+            return None;
+        }
+        let (mut buf, mut len) = ([0u8; 20], 20u32);
+        // 3 = CERT_SHA1_HASH_PROP_ID (el "Thumbprint" que muestra Windows)
+        (CertGetCertificateContextProperty((*cert).cert, 3, buf.as_mut_ptr(), &mut len) != 0 && len == 20).then(|| buf.iter().map(|b| format!("{b:02X}")).collect::<String>())
+    });
     td.state_action = 2; // WTD_STATEACTION_CLOSE
     unsafe { WinVerifyTrust(0, &ACTION_GENERIC_VERIFY_V2, &mut td as *mut TrustData as *mut c_void) };
-    if hr == 0 { Ok(()) } else { Err(format!("firma Authenticode ausente o no confiable (0x{:08X})", hr as u32)) }
+    match (hr, thumb.flatten()) {
+        (0, Some(t)) => Ok(t),
+        (0, None) => Err("firma válida pero no se pudo leer el certificado firmante".into()),
+        _ => Err(format!("firma Authenticode ausente o no confiable (0x{:08X})", hr as u32)),
+    }
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn CreateMutexW(attrs: *const c_void, owner: i32, name: *const u16) -> isize;
+    fn GetLastError() -> u32;
+    fn CloseHandle(h: isize) -> i32;
+}
+
+#[link(name = "user32")]
+extern "system" {
+    fn FindWindowW(class: *const u16, title: *const u16) -> isize;
+    fn SetForegroundWindow(hwnd: isize) -> i32;
+    fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
+    fn MessageBoxW(hwnd: isize, text: *const u16, caption: *const u16, kind: u32) -> i32;
+}
+
+fn wide(s: &str) -> Vec<u16> { s.encode_utf16().chain([0]).collect() }
+
+/// Instancia única: dos ventanas elevadas tocando registro, servicios y respaldos a la vez se pisan.
+/// Mutex con nombre en `Local\` (por sesión; no un archivo en una carpeta escribible). Si ya hay otra, la trae al frente
+/// (o avisa) y devuelve false. Reintenta unos segundos: al actualizar, la versión vieja abre la nueva y recién ahí se cierra.
+pub fn single_instance() -> bool {
+    let name = wide(r"Local\BotoxOptimizer.Instancia");
+    for _ in 0..30 {
+        let h = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+        let err = unsafe { GetLastError() };
+        // 183 = ERROR_ALREADY_EXISTS. 5 = ERROR_ACCESS_DENIED: la otra instancia está elevada y esta no.
+        if h != 0 && err != 183 {
+            return true; // el handle queda abierto hasta que se cierre el proceso
+        }
+        if h != 0 {
+            unsafe { CloseHandle(h) };
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let hwnd = unsafe { FindWindowW(std::ptr::null(), wide("Botox Optimizer").as_ptr()) };
+    if hwnd == 0 || unsafe { SetForegroundWindow(hwnd) } == 0 {
+        unsafe { MessageBoxW(0, wide("Botox Optimizer ya está abierto.").as_ptr(), wide("Botox Optimizer").as_ptr(), 0x40) };
+    } else {
+        unsafe { ShowWindow(hwnd, 9) }; // SW_RESTORE, por si estaba minimizada
+    }
+    false
 }
 
 /// Variables solo para pruebas y capturas. En release no se leen: un proceso inferior no puede activar hooks.
@@ -327,5 +445,34 @@ mod tests {
         assert_eq!(c.get_current_dir(), Some(system32()));
         let path = envs.iter().find(|(k, _)| k.as_str() == "path").and_then(|(_, v)| v.clone()).unwrap();
         assert!(!path.contains("BX_"), "{path}");
+    }
+
+    #[test]
+    fn una_carpeta_de_un_usuario_normal_no_sirve_para_lo_elevado() {
+        // Los tests corren sin elevar: lo que se crea acá es del usuario, como lo que plantaría un atacante en ProgramData.
+        let dir = std::env::temp_dir().join(format!("bx-owner-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(owner_is_admin(&dir), Ok(false));
+        assert!(require_admin_owned(&dir).is_err());
+        assert!(harden_dir(&dir).is_err(), "sin dueño admin no se endurece (se podría volver a abrir)");
+        let _ = std::fs::remove_dir_all(&dir);
+        // ProgramData es de SYSTEM: el chequeo reconoce un dueño administrativo.
+        assert_eq!(owner_is_admin(&program_data()), Ok(true), "{}", program_data().display());
+        assert!(owner_is_admin(Path::new(r"C:\no\existe\bx")).is_err());
+    }
+
+    #[test]
+    fn la_firma_devuelve_el_thumbprint_y_rechaza_lo_que_no_esta_firmado() {
+        // Sin firma: el propio ejecutable de los tests.
+        assert!(authenticode_signer(&std::env::current_exe().unwrap()).is_err());
+        // Con firma incrustada (los de System32 suelen estar firmados por catálogo, que esto no acepta).
+        let signed = [program_files().join(r"GitHub CLI\gh.exe"), program_files().join(r"Git\cmd\git.exe"), program_files().join(r"PowerShell\7\pwsh.exe")];
+        let Some(exe) = signed.iter().find(|p| p.is_file()) else {
+            eprintln!("no hay un .exe con firma incrustada para probar: se saltea");
+            return;
+        };
+        let t = authenticode_signer(exe).unwrap_or_else(|e| panic!("{}: {e}", exe.display()));
+        assert_eq!(t.len(), 40, "{t}");
+        assert!(t.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_lowercase()), "{t}");
     }
 }

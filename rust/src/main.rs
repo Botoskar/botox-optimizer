@@ -153,6 +153,12 @@ pub struct App {
 }
 
 fn main() -> eframe::Result {
+    // El actualizador corre `exe --version` antes de instalar: tiene que contestar sin abrir nada más.
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    install_panic_log();
     // Modo de prueba, solo lectura: imprime el estado de todos los tweaks como JSON y sale.
     if std::env::args().any(|a| a == "--check") {
         let cat = Catalog::load();
@@ -174,6 +180,12 @@ fn main() -> eframe::Result {
         println!("{}", spec.map_or_else(|e| format!("{{\"error\":{}}}", Value::String(e)), |v| v.to_string()));
         return Ok(());
     }
+    // Restaura la versión anterior si la nueva no llegó a arrancar bien (puede no volver: abre la vieja y sale).
+    update::on_start();
+    // Las copias de prueba (BX_FAKE, capturas) no cambian nada en la PC: pueden abrirse junto a la app real.
+    if sys::fake_kind().is_none() && win::test_env("BX_SHOT").is_none() && !win::single_instance() {
+        return Ok(());
+    }
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).expect("icono");
     let saved = load_saved();
     let mut vp = egui::ViewportBuilder::default()
@@ -188,6 +200,23 @@ fn main() -> eframe::Result {
     }
     let opts = eframe::NativeOptions { viewport: vp, ..Default::default() };
     eframe::run_native("Botox Optimizer", opts, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+}
+
+/// En release la app no tiene consola: un panic la cerraría sin dejar rastro. Se anota en
+/// %LOCALAPPDATA%\BotoxOptimizer\crash.log la fecha, la versión, el mensaje, dónde pasó y el backtrace
+/// (rutas de código y funciones; no datos del usuario).
+fn install_panic_log() {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let p = saved_path().with_file_name("crash.log");
+        let _ = std::fs::create_dir_all(p.parent().unwrap());
+        // Un log que crece sin límite no ayuda: pasado 1 MB se empieza de nuevo.
+        let append = std::fs::metadata(&p).is_ok_and(|m| m.len() < 1 << 20);
+        let text = format!("--- {} · v{} · unix {}\n{info}\n{}\n", if engine::is_admin() { "admin" } else { "sin admin" }, env!("CARGO_PKG_VERSION"), unix_now(), std::backtrace::Backtrace::force_capture());
+        let file = std::fs::OpenOptions::new().create(true).append(append).write(true).truncate(!append).open(&p);
+        let _ = file.and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()));
+        prev(info);
+    }));
 }
 
 fn saved_path() -> std::path::PathBuf {
@@ -221,6 +250,18 @@ fn clipboard_image() -> Result<image::DynamicImage, String> {
     }
     let file = cb.get().file_list().ok().and_then(|l| l.into_iter().next()).ok_or("no hay nada copiado que sea una imagen.")?;
     open_image(file)
+}
+
+/// Escribe a un temporal en la misma carpeta, lo baja a disco y lo renombra encima: un corte de luz deja el archivo
+/// viejo o el nuevo, nunca uno a medias.
+fn write_atomic(p: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    std::fs::create_dir_all(p.parent().unwrap())?;
+    let tmp = p.with_extension("json.tmp");
+    let mut f = std::fs::File::create(&tmp)?;
+    std::io::Write::write_all(&mut f, data)?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(&tmp, p)
 }
 
 fn load_saved() -> Saved { std::fs::read_to_string(saved_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default() }
@@ -295,7 +336,6 @@ impl App {
         if app.page == Page::Startup {
             app.startup = startup::scan();
         }
-        update::cleanup_old();
         if app.fake.is_none() {
             app.spawn(|tx, _, _| { let _ = tx.send(Msg::Update(update::check())); });
         }
@@ -321,9 +361,9 @@ impl App {
         if win::test_env("BX_SHOT").is_some() {
             return; // las capturas de prueba no tocan las preferencias del usuario
         }
-        let p = saved_path();
-        let _ = std::fs::create_dir_all(p.parent().unwrap());
-        let _ = std::fs::write(p, serde_json::to_string(&self.saved).unwrap());
+        if let Err(e) = write_atomic(&saved_path(), serde_json::to_string(&self.saved).unwrap().as_bytes()) {
+            Log(Some(self.log_tx.clone())).put("warn", format!("No se pudieron guardar las preferencias: {e}"));
+        }
     }
 
     pub fn toast(&mut self, msg: impl Into<String>, color: Color32, secs: f32) { self.toasts.push((msg.into(), color, Instant::now(), secs)); }
@@ -1078,6 +1118,9 @@ impl eframe::App for App {
         for a in std::mem::take(&mut self.actions) {
             self.act(a);
         }
+        // Primer cuadro dibujado: si veníamos de una actualización, quedó bien y se borra la copia vieja.
+        static FIRST_FRAME: std::sync::Once = std::sync::Once::new();
+        FIRST_FRAME.call_once(update::confirm_ok);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) { App::save(self); }

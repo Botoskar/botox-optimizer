@@ -105,7 +105,19 @@ pub fn backup_dir() -> PathBuf {
 }
 pub fn backup_path(id: &str) -> PathBuf { backup_dir().join(format!("{id}.json")) }
 
-/// Crea la carpeta y, en release, la deja solo para SYSTEM y Administradores.
+/// Rechaza enlaces y, con la app elevada, todo lo que no sea de SYSTEM/Administradores: ProgramData deja que un
+/// usuario normal cree carpetas y archivos ahí, y un respaldo plantado se aplicaría como administrador.
+fn guard(p: &std::path::Path) -> Result<(), String> {
+    if crate::engine::is_admin() {
+        crate::win::require_admin_owned(p)
+    } else if crate::win::is_reparse_point(p) {
+        Err(format!("{} es un enlace/reparse point: no se usa para respaldos", p.display()))
+    } else {
+        Ok(())
+    }
+}
+
+/// Crea la carpeta y, con la app elevada, exige que sea de un administrador y la deja solo para SYSTEM y Administradores.
 fn ensure_dir() -> Result<(), String> {
     let dir = backup_dir();
     let checks = match dir.parent() {
@@ -113,29 +125,25 @@ fn ensure_dir() -> Result<(), String> {
         None => vec![dir.clone()],
     };
     // Un junction/symlink plantado en ProgramData redirigiría escrituras elevadas a otra carpeta.
-    for p in &checks {
-        if crate::win::is_reparse_point(p) {
-            return Err(format!("{} es un enlace/reparse point: no se usa para respaldos", p.display()));
-        }
+    for p in checks.iter().filter(|p| p.exists()) {
+        guard(p)?;
     }
     std::fs::create_dir_all(&dir).map_err(|e| format!("no se pudo crear la carpeta de respaldos: {e}"))?;
     for p in &checks {
-        if crate::win::is_reparse_point(p) {
-            return Err(format!("{} es un enlace/reparse point: no se usa para respaldos", p.display()));
-        }
+        guard(p)?;
     }
-    #[cfg(not(debug_assertions))]
-    crate::win::harden_dir(&dir)?;
+    if crate::engine::is_admin() {
+        crate::win::harden_dir(&dir)?;
+    }
     Ok(())
 }
 
 /// Guarda el respaldo solo si no existe (nunca pisa los valores originales). Devuelve true si lo creó.
 pub fn save_backup(id: &str, items: &Value) -> Result<bool, String> {
     let f = backup_path(id);
-    if crate::win::is_reparse_point(&f) {
-        return Err(format!("{} es un enlace/reparse point: no se usa para respaldos", f.display()));
-    }
-    if f.exists() {
+    if f.exists() || crate::win::is_reparse_point(&f) {
+        // Uno que ya existe tiene que ser legítimo: si lo plantó otro usuario, no se toma como "los valores originales".
+        guard(&f)?;
         return Ok(false);
     }
     ensure_dir()?;
@@ -160,9 +168,14 @@ pub fn save_backup(id: &str, items: &Value) -> Result<bool, String> {
 /// Lee el respaldo sin borrarlo. Si está corrupto devuelve Err y lo deja en disco para poder revisarlo.
 pub fn read_backup(id: &str) -> Result<Option<Vec<Value>>, String> {
     let f = backup_path(id);
-    if crate::win::is_reparse_point(&f) {
-        return Err(format!("{} es un enlace/reparse point: no se usa para respaldos", f.display()));
+    if !f.exists() && !crate::win::is_reparse_point(&f) {
+        return Ok(None);
     }
+    // Carpeta y archivo: con la app elevada, solo se aplica un respaldo escrito por un administrador.
+    if let Some(dir) = f.parent() {
+        guard(dir)?;
+    }
+    guard(&f)?;
     let text = match std::fs::read_to_string(&f) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),

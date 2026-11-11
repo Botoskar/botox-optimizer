@@ -54,29 +54,31 @@ function Del-RegVal($p, $n) {
 }
 function StopSvc($n) { $s = Get-Service $n -ErrorAction SilentlyContinue; if ($s -and $s.Status -eq 'Running') { Stop-Service $n -Force -ErrorAction SilentlyContinue; Log "Servicio $($n): detenido" } }
 function Skip($x) { $x.Count -gt 5 -and $x[5] -and !(Test-Path -LiteralPath $x[0]) }
+# Un junction/symlink, o algo que creó un usuario normal (ProgramData lo deja), no sirve para respaldos que se aplican
+# como administrador: su dueño siempre puede volver a darse permisos. Solo vale lo que es de SYSTEM o Administradores.
+function BkGuard($p) {
+  $it = Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+  if (!$it) { return }
+  if ($it.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "$p es un enlace/reparse point: no se usa para respaldos" }
+  $o = (Get-Acl -LiteralPath $p).GetOwner([Security.Principal.SecurityIdentifier]).Value
+  if ($o -notin 'S-1-5-18', 'S-1-5-32-544') { throw "$p no pertenece a SYSTEM ni a Administradores (lo creó otro usuario): no se usa por seguridad" }
+}
 function Save-Bk($id, $obj) {
   $f = "$BK\$id.json"
-  $fi = Get-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
-  if ($fi -and ($fi.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "$f es un enlace/reparse point: no se usa para respaldos" }
-  if (Test-Path $f) { Log "Ya hay un respaldo de '$id': se conservan los valores originales"; return }
+  BkGuard (Split-Path $BK -Parent); BkGuard $BK; BkGuard $f
+  if (Test-Path -LiteralPath $f) { Log "Ya hay un respaldo de '$id': se conservan los valores originales"; return }
   if (-not $script:BKREADY) {
-    # Un junction/symlink plantado en ProgramData redirigiría escrituras elevadas a otra carpeta.
-    foreach ($p in @($BK, (Split-Path $BK -Parent))) {
-      $it = Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
-      if ($it -and ($it.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "$p es un enlace/reparse point: no se usa para respaldos" }
-    }
     New-Item -ItemType Directory $BK -Force | Out-Null
-    $it = Get-Item -LiteralPath $BK -Force -ErrorAction SilentlyContinue
-    if ($it -and ($it.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "$BK es un enlace/reparse point: no se usa para respaldos" }
-    # Solo SYSTEM y Administradores: un usuario normal no puede plantar respaldos que después se apliquen elevados.
-    $ic = [Environment]::SystemDirectory + '\icacls.exe'
-    if (Test-Path $ic) { & $ic $BK /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /T /C /Q | Out-Null }
+    BkGuard (Split-Path $BK -Parent); BkGuard $BK
+    # Solo SYSTEM y Administradores. Si icacls falla, no se escribe el respaldo (igual que en Rust).
+    & ([Environment]::SystemDirectory + '\icacls.exe') $BK /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /T /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "no se pudieron endurecer los permisos de $BK (icacls devolvió $LASTEXITCODE)" }
     $script:BKREADY = $true
   }
-  ConvertTo-Json -InputObject $obj -Depth 4 | Set-Content $f -Encoding UTF8
+  ConvertTo-Json -InputObject $obj -Depth 4 | Set-Content -LiteralPath $f -Encoding UTF8
   Log "Respaldo guardado: $f ($(@($obj).Count) valores)"
 }
-function Read-Bk($id) { $f = "$BK\$id.json"; $fi = Get-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue; if ($fi -and ($fi.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "$f es un enlace/reparse point: no se usa para respaldos" }; if (Test-Path $f) { $o = Get-Content $f -Raw | ConvertFrom-Json; Log "Restaurando desde el respaldo $f"; return ,$o } }
+function Read-Bk($id) { $f = "$BK\$id.json"; BkGuard $BK; BkGuard $f; if (Test-Path -LiteralPath $f) { $o = Get-Content -LiteralPath $f -Raw | ConvertFrom-Json; Log "Restaurando desde el respaldo $f"; return ,$o } }
 function Remove-Bk($id) { $f = "$BK\$id.json"; if (Test-Path $f) { Remove-Item $f -Force -ErrorAction SilentlyContinue } }
 
 function RegApply($id, $L) {
@@ -120,7 +122,8 @@ $PWN = @{ '48e6b7a6' = 'Suspensión selectiva USB'; 'ee12f906' = 'Ahorro de ener
   'be337238' = 'Modo boost del procesador'; '893dee8e' = 'Estado mínimo del procesador (%)'; '6738e2c4' = 'Apagar disco tras (s)' }
 function PwrSet($sub, $set, $v) {
   $o = PwrGet $sub $set
-  powercfg /setacvalueindex SCHEME_CURRENT $sub $set $v; powercfg /setdcvalueindex SCHEME_CURRENT $sub $set $v
+  powercfg /setacvalueindex SCHEME_CURRENT $sub $set $v; if ($LASTEXITCODE) { throw "powercfg no pudo cambiar $set (código $LASTEXITCODE)" }
+  powercfg /setdcvalueindex SCHEME_CURRENT $sub $set $v; if ($LASTEXITCODE) { throw "powercfg no pudo cambiar $set en batería (código $LASTEXITCODE)" }
   $nm = $PWN[$set.Substring(0, 8)]; if (!$nm) { $nm = $set }
   Log "Plan de energía · $($nm): $o → $v"
 }
@@ -138,6 +141,7 @@ function PwrRevert($id, $P) {
 }
 function PwrSetAC($sub, $set, $v) {
   $o = PwrGet $sub $set; powercfg /setacvalueindex SCHEME_CURRENT $sub $set $v
+  if ($LASTEXITCODE) { throw "powercfg no pudo cambiar $set (código $LASTEXITCODE)" }
   $nm = $PWN[$set.Substring(0, 8)]; if (!$nm) { $nm = $set }
   Log "Plan de energía (enchufada) · $($nm): $o → $v"
 }
@@ -202,8 +206,13 @@ function NicApply($id, $kv) {
 }
 function NicRevert($id, $kv) {
   $b = Read-Bk "$id-nic"; if ($null -eq $b -or !@($b).Count) { Remove-Bk "$id-nic"; return }; $n = @(Nics).Count
-  foreach ($c in $b) { if (!$kv.ContainsKey($c.k)) { Log "El respaldo trae una propiedad de red ajena ($($c.k)): se saltea" 'warn'; continue }; Set-NetAdapterAdvancedProperty -Name $c.a -RegistryKeyword $c.k -RegistryValue $c.v -NoRestart -ErrorAction SilentlyContinue; Log "Placa $($c.a) · $($c.k): → $($c.v)" }
+  $fail = 0
+  foreach ($c in $b) { if (!$kv.ContainsKey($c.k)) { Log "El respaldo trae una propiedad de red ajena ($($c.k)): se saltea" 'warn'; continue }
+    try { Set-NetAdapterAdvancedProperty -Name $c.a -RegistryKeyword $c.k -RegistryValue $c.v -NoRestart -ErrorAction Stop; Log "Placa $($c.a) · $($c.k): → $($c.v)" }
+    catch { $fail++; Log "Placa $($c.a) · $($c.k): no se pudo restaurar ($($_.Exception.Message))" 'warn' } }
   NicRestart @($b.a | Select-Object -Unique); WaitNics $n
+  # Si algo no volvió, el respaldo queda para reintentar: borrarlo perdería los valores originales.
+  if ($fail) { throw "$fail propiedades de red no se pudieron restaurar; el respaldo se conserva para reintentar" }
   Remove-Bk "$id-nic"
 }
 # Cada driver expone distintas propiedades: solo se exige que las que existen tengan el valor buscado.

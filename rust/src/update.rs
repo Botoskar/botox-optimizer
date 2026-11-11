@@ -14,6 +14,19 @@ const REPO: &str = "Botoskar/botox-optimizer-releases";
 const ASSET: &str = "BotoxOptimizer.exe";
 /// En release no se instala nada sin firma. Las pruebas locales (debug) sí pueden probar el flujo sin firmar.
 const REQUIRE_SIGNATURE: bool = !cfg!(debug_assertions);
+/// Publisher pinning: thumbprints SHA-1 de los certificados con los que se firman las versiones. Una firma válida
+/// de cualquier otro certificado se rechaza. Es una lista para poder renovar el certificado: la versión firmada con
+/// el viejo trae ya el nuevo. VACÍA = en release no se instala ninguna actualización (todavía no hay certificado).
+/// Cómo sacarlo: `(Get-AuthenticodeSignature .\BotoxOptimizer.exe).SignerCertificate.Thumbprint` (ver README).
+/// No hay variable de entorno para saltearlo: sería un bypass.
+const PUBLISHER_THUMBPRINTS: &[&str] = &[];
+
+/// true si el thumbprint (con o sin espacios, en cualquier caso) está en la lista fijada.
+fn pin_matches(thumb: &str, pins: &[&str]) -> bool {
+    let norm = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_uppercase();
+    let t = norm(thumb);
+    t.len() == 40 && t.bytes().all(|c| c.is_ascii_hexdigit()) && pins.iter().any(|p| norm(p) == t)
+}
 const MAX_DOWNLOAD: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -135,15 +148,6 @@ pub fn check() -> Result<Option<Update>, String> {
 
 fn side(exe: &Path, tag: &str) -> PathBuf { exe.with_extension(format!("{tag}.exe")) }
 
-/// Borra las copias que deja una actualización (no se puede mientras el programa viejo sigue abierto).
-pub fn cleanup_old() {
-    if let Ok(exe) = std::env::current_exe() {
-        for tag in ["old", "nuevo", "verified"] {
-            let _ = std::fs::remove_file(side(&exe, tag));
-        }
-    }
-}
-
 /// Baja el .exe, comprueba hash y firma, y lo pone en lugar del actual. El actual queda como "….old.exe" por si algo falla.
 /// Windows deja renombrar un programa mientras corre, por eso no hace falta cerrarlo antes.
 pub fn install(u: &Update) -> Result<(), String> {
@@ -178,12 +182,7 @@ pub fn install(u: &Update) -> Result<(), String> {
     if !sha256::hex(&bytes).eq_ignore_ascii_case(&u.sha256) {
         return discard("El archivo descargado no coincide con el hash publicado. No se instaló nada.".into());
     }
-    if REQUIRE_SIGNATURE {
-        if let Err(e) = win::verify_authenticode(&new) {
-            return discard(format!("El archivo no tiene una firma Authenticode válida ({e}). No se instaló nada."));
-        }
-    }
-    // Se escribe una copia de los bytes ya verificados y se renombra esa copia: nadie puede cambiarla entre el hash y el rename.
+    // Se escribe una copia de los bytes ya verificados y todo lo demás (firma, prueba, rename) se hace sobre esa copia.
     let _ = std::fs::remove_file(&verified);
     let write = || -> Result<(), String> {
         let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&verified).map_err(|e| format!("No se pudo preparar la versión nueva: {e}"))?;
@@ -194,6 +193,25 @@ pub fn install(u: &Update) -> Result<(), String> {
         return discard(e);
     }
     let _ = std::fs::remove_file(&new);
+    // La firma se mira en el archivo que se va a instalar, no en la descarga (antes eran dos archivos distintos).
+    if REQUIRE_SIGNATURE {
+        match win::authenticode_signer(&verified) {
+            Err(e) => return discard(format!("El archivo no tiene una firma Authenticode válida ({e}). No se instaló nada.")),
+            Ok(t) if !pin_matches(&t, PUBLISHER_THUMBPRINTS) => {
+                return discard(format!("El archivo está firmado por otro certificado ({t}), no por el de Botox Optimizer. No se instaló nada."));
+            }
+            Ok(_) => {}
+        }
+    }
+    // Antes de tocar el programa actual: la versión nueva tiene que arrancar y decir qué versión es.
+    if let Err(e) = self_test(&verified, &u.version) {
+        return discard(format!("La versión nueva no pasó la prueba de arranque ({e}). No se instaló nada."));
+    }
+    // Riesgo residual (TOCTOU): entre esta comprobación y el rename, alguien con escritura en la carpeta del .exe podría
+    // cambiar el archivo; pero ese alguien ya puede reemplazar el .exe directamente. Se vuelve a calcular el hash igual.
+    if !std::fs::read(&verified).is_ok_and(|b| sha256::hex(&b).eq_ignore_ascii_case(&u.sha256)) {
+        return discard("La versión nueva cambió después de verificarla. No se instaló nada.".into());
+    }
     let _ = std::fs::remove_file(&old);
     if let Err(e) = std::fs::rename(&exe, &old) {
         let _ = std::fs::remove_file(&verified);
@@ -204,7 +222,106 @@ pub fn install(u: &Update) -> Result<(), String> {
         let _ = std::fs::remove_file(&verified);
         return Err(format!("No se pudo instalar la versión nueva: {e}"));
     }
+    // La versión nueva confirma al dibujar su primer cuadro; si no llega a hacerlo, en el arranque siguiente vuelve a la vieja.
+    let _ = std::fs::write(pending_path(&exe), "0");
     Ok(())
+}
+
+/// Corre `exe --version` (sin ventana, máximo 20 s) y exige que conteste la versión esperada.
+fn self_test(exe: &Path, expected: &str) -> Result<(), String> {
+    use std::io::Read;
+    let mut child = win::secure_command(exe)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("no arrancó: {e}"))?;
+    let t0 = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if t0.elapsed() < Duration::from_secs(20) => std::thread::sleep(Duration::from_millis(100)),
+            _ => {
+                let _ = child.kill();
+                return Err("no respondió".into());
+            }
+        }
+    }
+    let mut out = String::new();
+    let _ = child.stdout.take().map(|mut s| s.read_to_string(&mut out));
+    match (parse_ver(&out), parse_ver(expected)) {
+        (Some(a), Some(b)) if a == b => Ok(()),
+        _ => Err(format!("respondió {:?} en vez de {expected}", out.trim())),
+    }
+}
+
+// ── Vuelta atrás si la versión nueva no arranca ──
+// install deja "<exe>.update-pending" con "0". Al arrancar, la versión nueva lo pasa a "1"; al dibujar el primer cuadro
+// lo borra junto con la copia vieja. Si arranca otra vez y encuentra "1", la vez anterior no llegó a dibujar: vuelve a la vieja.
+
+fn pending_path(exe: &Path) -> PathBuf { exe.with_extension("update-pending") }
+
+#[derive(Debug, PartialEq)]
+enum Boot {
+    /// Sin actualización a medio confirmar.
+    Normal,
+    /// Primer arranque de la versión nueva.
+    FirstTry,
+    /// La versión nueva ya arrancó una vez sin llegar a dibujar: volver a la anterior.
+    RollBack,
+}
+
+fn boot_decision(marker: Option<&str>, old_exists: bool) -> Boot {
+    match marker.map(str::trim) {
+        None => Boot::Normal,
+        // Sin la copia vieja no hay adónde volver.
+        Some(_) if !old_exists => Boot::Normal,
+        Some("0") => Boot::FirstTry,
+        Some(_) => Boot::RollBack,
+    }
+}
+
+/// Primera cosa que hace la app al abrir. Limpia lo que deja una actualización y, si la versión nueva no llegó a
+/// arrancar bien la vez anterior, restaura la vieja y la abre (no vuelve).
+pub fn on_start() {
+    let Ok(exe) = std::env::current_exe() else { return };
+    let (pending, old) = (pending_path(&exe), side(&exe, "old"));
+    for tag in ["nuevo", "verified", "failed"] {
+        let _ = std::fs::remove_file(side(&exe, tag));
+    }
+    match boot_decision(std::fs::read_to_string(&pending).ok().as_deref(), old.is_file()) {
+        Boot::Normal => {
+            let _ = std::fs::remove_file(&pending);
+            let _ = std::fs::remove_file(&old);
+        }
+        Boot::FirstTry => {
+            let _ = std::fs::write(&pending, "1");
+        }
+        Boot::RollBack => {
+            let failed = side(&exe, "failed");
+            if std::fs::rename(&exe, &failed).is_ok() {
+                if std::fs::rename(&old, &exe).is_ok() {
+                    let _ = std::fs::remove_file(&pending);
+                    if win::secure_command(&exe).spawn().is_ok() {
+                        std::process::exit(0);
+                    }
+                    return;
+                }
+                let _ = std::fs::rename(&failed, &exe);
+            }
+            // No se pudo volver atrás: se sigue con esta versión y se suelta el marcador para no intentarlo en cada arranque.
+            let _ = std::fs::remove_file(&pending);
+        }
+    }
+}
+
+/// La versión nueva dibujó su primer cuadro: la actualización quedó bien y la copia vieja ya no hace falta.
+pub fn confirm_ok() {
+    let Ok(exe) = std::env::current_exe() else { return };
+    if std::fs::remove_file(pending_path(&exe)).is_ok() {
+        let _ = std::fs::remove_file(side(&exe, "old"));
+    }
 }
 
 #[cfg(test)]
@@ -265,5 +382,38 @@ mod tests {
         assert!(local("http://127.0.0.1:8765/r.json") && local("http://localhost/x"));
         assert!(!local("http://evil.com/r.json") && !local("https://127.0.0.1/x") && !local("http://127.0.0.1.evil.com/x") && !local("http://localhost.evil.com"));
         assert!(!local("http://localhost:80@evil.com/x"));
+    }
+
+    #[test]
+    fn el_pin_acepta_solo_los_certificados_fijados() {
+        const A: &str = "0123456789ABCDEF0123456789ABCDEF01234567";
+        let pins = [A, "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"];
+        assert!(pin_matches(A, &pins));
+        assert!(pin_matches(&A.to_ascii_lowercase(), &pins), "sin importar mayúsculas");
+        assert!(pin_matches("01 23 45 67 89 AB CD EF 01 23 45 67 89 AB CD EF 01 23 45 67", &pins), "con espacios, como lo copia certmgr");
+        assert!(!pin_matches("1123456789ABCDEF0123456789ABCDEF01234567", &pins), "otro certificado");
+        assert!(!pin_matches("", &[""]), "vacío no vale");
+        assert!(!pin_matches(A, &[]), "sin certificados fijados no se acepta nada");
+        assert!(!pin_matches(&A[..39], &[&A[..39]]), "largo incorrecto");
+        assert!(PUBLISHER_THUMBPRINTS.iter().all(|p| p.len() == 40), "los fijados son thumbprints SHA-1 completos");
+    }
+
+    #[test]
+    fn decide_cuando_volver_a_la_version_anterior() {
+        assert_eq!(boot_decision(None, true), Boot::Normal, "sin marcador: arranque normal (y se borra la copia vieja)");
+        assert_eq!(boot_decision(Some("0"), true), Boot::FirstTry, "primer arranque de la versión nueva");
+        assert_eq!(boot_decision(Some("0\r\n"), true), Boot::FirstTry);
+        assert_eq!(boot_decision(Some("1"), true), Boot::RollBack, "arrancó una vez y no llegó a dibujar");
+        assert_eq!(boot_decision(Some("basura"), true), Boot::RollBack, "un marcador raro también vuelve atrás");
+        assert_eq!(boot_decision(Some("1"), false), Boot::Normal, "sin copia vieja no hay adónde volver");
+        assert_eq!(pending_path(Path::new(r"C:\x\BotoxOptimizer.exe")), PathBuf::from(r"C:\x\BotoxOptimizer.update-pending"));
+        assert_eq!(side(Path::new(r"C:\x\BotoxOptimizer.exe"), "old"), PathBuf::from(r"C:\x\BotoxOptimizer.old.exe"));
+    }
+
+    #[test]
+    fn la_prueba_de_arranque_exige_la_version_correcta() {
+        // cmd.exe no entiende --version: no contesta una versión, así que no pasa.
+        assert!(self_test(&win::system32_exe("cmd.exe"), "2.4.0").is_err());
+        assert!(self_test(Path::new(r"C:\no\existe.exe"), "2.4.0").is_err());
     }
 }
