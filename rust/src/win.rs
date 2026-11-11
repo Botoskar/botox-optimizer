@@ -231,7 +231,7 @@ pub fn require_admin_owned(p: &Path) -> Result<(), String> {
     }
     match owner_is_admin(p)? {
         true => Ok(()),
-        false => Err(format!("{} no pertenece a SYSTEM ni a Administradores (lo creó otro usuario): no se usa por seguridad", p.display())),
+        false => Err(format!("{} no pertenece a SYSTEM ni a Administradores (lo creó otro usuario): no se usa por seguridad. Si la creaste vos, borrala desde una consola de administrador y volvé a intentar", p.display())),
     }
 }
 

@@ -180,11 +180,15 @@ fn main() -> eframe::Result {
         println!("{}", spec.map_or_else(|e| format!("{{\"error\":{}}}", Value::String(e)), |v| v.to_string()));
         return Ok(());
     }
-    // Restaura la versión anterior si la nueva no llegó a arrancar bien (puede no volver: abre la vieja y sale).
-    update::on_start();
-    // Las copias de prueba (BX_FAKE, capturas) no cambian nada en la PC: pueden abrirse junto a la app real.
-    if sys::fake_kind().is_none() && win::test_env("BX_SHOT").is_none() && !win::single_instance() {
-        return Ok(());
+    // Las copias de prueba (BX_FAKE, capturas) no cambian nada en la PC: pueden abrirse junto a la app real y no tocan
+    // la actualización. La real primero toma el mutex: así otra instancia (o la vieja que todavía cierra) no la hace
+    // salir con el marcador ya en "1", ni dos arranques juntos deciden volver atrás.
+    if !is_test_copy() {
+        if !win::single_instance() {
+            return Ok(());
+        }
+        // Restaura la versión anterior si la nueva no llegó a arrancar bien (puede no volver: abre la vieja y sale).
+        update::on_start();
     }
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).expect("icono");
     let saved = load_saved();
@@ -205,6 +209,11 @@ fn main() -> eframe::Result {
 /// En release la app no tiene consola: un panic la cerraría sin dejar rastro. Se anota en
 /// %LOCALAPPDATA%\BotoxOptimizer\crash.log la fecha, la versión, el mensaje, dónde pasó y el backtrace
 /// (rutas de código y funciones; no datos del usuario).
+/// Copia de prueba (BX_FAKE o captura): sin mutex ni confirmación/vuelta atrás de actualizaciones.
+fn is_test_copy() -> bool {
+    sys::fake_kind().is_some() || win::test_env("BX_SHOT").is_some()
+}
+
 fn install_panic_log() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -1138,7 +1147,11 @@ impl eframe::App for App {
         }
         // Primer cuadro dibujado: si veníamos de una actualización, quedó bien y se borra la copia vieja.
         static FIRST_FRAME: std::sync::Once = std::sync::Once::new();
-        FIRST_FRAME.call_once(update::confirm_ok);
+        FIRST_FRAME.call_once(|| {
+            if !is_test_copy() {
+                update::confirm_ok()
+            }
+        });
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) { App::save(self); }
