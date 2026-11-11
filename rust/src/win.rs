@@ -235,21 +235,24 @@ pub fn require_admin_owned(p: &Path) -> Result<(), String> {
     }
 }
 
-/// Deja una carpeta solo para SYSTEM y Administradores (sin herencia). La usan los respaldos.
+/// Deja una carpeta solo para SYSTEM y Administradores (sin herencia de afuera). La usan los respaldos.
 /// Primero exige que la carpeta ya sea de un administrador: si no, los permisos se podrían volver a abrir.
+/// Sin `/T`: aplicado a cada archivo, `/inheritance:r` les sacaba lo heredado y `(OI)(CI)` no vale en un archivo, así
+/// que quedaban sin ningún permiso (ni un administrador podía leerlos). Los archivos heredan de la carpeta con `/reset`,
+/// que además repara los que ya habían quedado así.
 pub fn harden_dir(dir: &Path) -> Result<(), String> {
     require_admin_owned(dir)?;
-    // Sin /C: si falla en un archivo de adentro, icacls corta y devuelve error en vez de seguir.
-    let out = secure_command(system32_exe("icacls.exe"))
-        .arg(dir.as_os_str())
-        .args(["/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "/T", "/Q"])
-        .output()
-        .map_err(|e| format!("no se pudo ejecutar icacls: {e}"))?;
-    if !out.status.success() {
+    let icacls = |args: &[&std::ffi::OsStr]| -> Result<(), String> {
+        let out = secure_command(system32_exe("icacls.exe")).args(args).output().map_err(|e| format!("no se pudo ejecutar icacls: {e}"))?;
+        if out.status.success() {
+            return Ok(());
+        }
         let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return Err(format!("no se pudieron endurecer los permisos de {}: {}", dir.display(), if msg.is_empty() { format!("icacls devolvió {}", out.status.code().unwrap_or(-1)) } else { msg }));
-    }
-    Ok(())
+        Err(format!("no se pudieron endurecer los permisos de {}: {}", dir.display(), if msg.is_empty() { format!("icacls devolvió {}", out.status.code().unwrap_or(-1)) } else { msg }))
+    };
+    let os = |s: &'static str| std::ffi::OsStr::new(s);
+    icacls(&[dir.as_os_str(), os("/inheritance:r"), os("/grant:r"), os("*S-1-5-18:(OI)(CI)F"), os("*S-1-5-32-544:(OI)(CI)F"), os("/Q")])?;
+    icacls(&[dir.join("*").as_os_str(), os("/reset"), os("/Q")])
 }
 
 /// Carpeta donde se escriben los .ps1. Si la app está elevada va a ProgramData con ACL de administrador;

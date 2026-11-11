@@ -221,6 +221,8 @@ fn main() -> eframe::Result {
         } else if !win::single_instance() {
             win::message("Botox Optimizer está abierto: cerralo y repetí, o usá \"Revertir todo\" en Backups.", true);
         } else {
+            // Si falla, cada respaldo ilegible lo dice en el resumen.
+            let _ = reg::repair_backups();
             let (ok, msg) = revert_all_cli(args.iter().any(|a| a == "--yes"));
             win::message(&msg, !ok);
         }
@@ -235,6 +237,9 @@ fn main() -> eframe::Result {
         }
         // Restaura la versión anterior si la nueva no llegó a arrancar bien (puede no volver: abre la vieja y sale).
         update::on_start();
+        // Repara los permisos de los respaldos que dejaron versiones anteriores. Si falla, cada respaldo ilegible lo
+        // dice en la consola al usarlo.
+        let _ = reg::repair_backups();
     }
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).expect("icono");
     let saved = load_saved();
