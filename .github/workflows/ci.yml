@@ -1,0 +1,82 @@
+# Compila, testea y controla el catálogo en cada push y PR. No publica nada ni usa secretos.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      # El proyecto compila con la variante GNU de Rust: build.rs usa windres y el enlazado usa gcc/dlltool de MinGW.
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: MINGW64
+          update: false
+          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-binutils
+      - name: MinGW en el PATH
+        run: Add-Content $env:GITHUB_PATH "${{ steps.msys2.outputs.msys2-location }}\mingw64\bin"
+
+      # Misma versión que el toolchain del dueño (rustc -vV: 1.99.1, host x86_64-pc-windows-gnu).
+      - name: Rust 1.99.1 (GNU)
+        run: |
+          rustup toolchain install 1.99.1-x86_64-pc-windows-gnu --profile minimal -c rustfmt,clippy
+          rustup default 1.99.1-x86_64-pc-windows-gnu
+          rustc -vV
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: El catálogo generado está al día con tweaks.js y scan.js
+        run: |
+          node rust/tools/export-catalog.js
+          git diff --ignore-cr-at-eol --exit-code rust/assets/catalog.json
+
+      - name: Sintaxis de los scripts de PowerShell (5.1, sin ejecutarlos)
+        shell: powershell
+        run: powershell -NoProfile -File rust/tools/parse-ps.ps1
+
+      - name: Tests
+        working-directory: rust
+        run: cargo test --locked
+
+      - name: Build de distribución (pide admin; no se publica)
+        working-directory: rust
+        env:
+          BX_ADMIN: "1"
+        run: cargo build --release --locked
+
+      # No bloquean todavía: el código usa líneas largas a propósito y nunca pasó por rustfmt/clippy.
+      # Pasarlos a obligatorios después de un formateo acordado (un commit solo de formato).
+      - name: rustfmt (informativo)
+        working-directory: rust
+        continue-on-error: true
+        run: cargo fmt --check
+      - name: clippy (informativo)
+        working-directory: rust
+        continue-on-error: true
+        run: cargo clippy --locked -- -D warnings
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      # Informativo: si falla por red o por una advisory nueva, queda marcado en amarillo sin frenar el resto.
+      # Revisar el log: una vulnerabilidad en image/tiff/png/arboard importa porque la app corre como admin.
+      - name: cargo audit
+        continue-on-error: true
+        run: cargo audit --file rust/Cargo.lock

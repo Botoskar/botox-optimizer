@@ -1,0 +1,13 @@
+# Avisa con PRs de dependencias desactualizadas. No hay package.json (los .js son scripts sueltos sin dependencias).
+# Revisar cada PR: una actualización que rompe se reporta, no se mergea a ciegas.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /rust
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

@@ -449,7 +449,12 @@ mod tests {
 
     #[test]
     fn una_carpeta_de_un_usuario_normal_no_sirve_para_lo_elevado() {
-        // Los tests corren sin elevar: lo que se crea acá es del usuario, como lo que plantaría un atacante en ProgramData.
+        // Lo que se crea acá es del usuario, como lo que plantaría un atacante en ProgramData. Elevado (los runners de
+        // GitHub corren como admin) lo creado es de Administradores y la prueba no aplica.
+        if crate::engine::is_admin() {
+            eprintln!("corriendo elevado: se saltea");
+            return;
+        }
         let dir = std::env::temp_dir().join(format!("bx-owner-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(owner_is_admin(&dir), Ok(false));
