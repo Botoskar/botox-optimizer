@@ -41,6 +41,29 @@ pub fn facts(spec: &Value) -> Facts {
     }
 }
 
+/// Estado de VBS (seguridad basada en virtualización).
+/// Windows informa "corriendo" (2) apenas el hipervisor está encendido, aunque ninguna función lo use: Hyper-V, WSL2 y Docker
+/// lo mantienen así. Lo que cuesta FPS son las funciones que corren encima (sobre todo la Integridad de memoria).
+#[derive(Debug, PartialEq)]
+pub enum Vbs {
+    /// Hay funciones de seguridad corriendo (sus nombres).
+    On(Vec<&'static str>),
+    /// El hipervisor corre, pero ninguna función de seguridad lo usa.
+    Idle,
+    Off,
+    /// Escaneo viejo, sin la lista de funciones: se conserva el criterio de antes.
+    Legacy,
+}
+
+pub fn vbs_state(spec: &Value) -> Vbs {
+    if n(&spec["vbs"]) != 2.0 {
+        return Vbs::Off;
+    }
+    let Some(running) = spec["vbsRunning"].as_array() else { return Vbs::Legacy };
+    let names: Vec<&'static str> = running.iter().filter_map(|x| match x.as_u64()? { 1 => Some("Credential Guard"), 2 => Some("Integridad de memoria"), 3 => Some("System Guard"), 4 => Some("Protección de pila"), _ => None }).collect();
+    if names.is_empty() { Vbs::Idle } else { Vbs::On(names) }
+}
+
 /// Radeon RX 6000 o más nueva: "RX " y 4 cifras que empiezan en 6-9. La RX 580 (3 cifras) y la RX 5700 XT quedan afuera.
 fn is_rdna2(gpu_lower: &str) -> bool {
     gpu_lower.contains("radeon") && gpu_lower.split("rx ").skip(1).any(|r| {
@@ -97,10 +120,15 @@ pub fn findings(spec: &Value, f: &Facts) -> Vec<(&'static str, String, String)> 
     if f.c_free_gb < 30 {
         add("warn", format!("C: con {} GB libres", f.c_free_gb), "Poco espacio en el disco del sistema. Probá Boost-Up y \"Desactivar hibernación\".");
     }
-    if n(&spec["vbs"]) == 2.0 {
-        add("warn", "VBS (seguridad basada en virtualización) activa".into(), "Puede costar 5-10% de FPS. Ver \"Desactivar VBS\" en Optimizaciones.");
-    } else {
-        add("ok", "VBS desactivada".into(), "Sin costo de rendimiento por virtualización.");
+    match vbs_state(spec) {
+        Vbs::On(names) => add("warn", format!("VBS activa: {}", names.join(", ")), "Puede costar 5-10% de FPS (la Integridad de memoria es la que más pesa). Ver \"Desactivar VBS\" en Optimizaciones."),
+        Vbs::Legacy => add("warn", "VBS (seguridad basada en virtualización) activa".into(), "Puede costar 5-10% de FPS. Ver \"Desactivar VBS\" en Optimizaciones."),
+        Vbs::Idle => add("ok", "VBS sin funciones activas".into(), if spec["hypervisor"].as_bool() == Some(true) {
+            "Integridad de memoria y Credential Guard están apagadas. El hipervisor sigue encendido por otra función de Windows (Hyper-V, WSL2 o Docker): no es lo que cuesta FPS."
+        } else {
+            "Integridad de memoria y Credential Guard están apagadas: sin costo de rendimiento por seguridad."
+        }),
+        Vbs::Off => add("ok", "VBS desactivada".into(), "Sin costo de rendimiento por virtualización."),
     }
     if (f.gpu_vendor == "NVIDIA" || f.amd_rdna2) && n(&spec["hags"]) != 2.0 {
         add("warn", "HAGS desactivado".into(), "La programación de GPU acelerada baja la latencia de entrada en tu placa de video. Activala en Optimizaciones.");
@@ -222,6 +250,37 @@ mod tests {
         for expected in ["RAM a 3000 MHz DDR4", "PCIe 3.0", "Poca caché L3 (16 MB)", "Plan de energía: Equilibrado", "Red a 100 Mbps", "Pantalla a 240 Hz"] {
             assert!(titles.iter().any(|t| t.contains(expected)), "falta el hallazgo '{expected}' en {titles:?}");
         }
+    }
+
+    #[test]
+    fn vbs_solo_cuenta_si_hay_funciones_de_seguridad_corriendo() {
+        // Tu PC: Windows dice "2" porque Hyper-V/Docker mantienen el hipervisor, pero no corre ninguna función de seguridad.
+        assert_eq!(vbs_state(&json!({ "vbs": 2, "vbsRunning": [], "hypervisor": true })), Vbs::Idle);
+        // Así lo informa Windows de verdad cuando no corre nada: la lista trae un 0 ("ninguna función").
+        assert_eq!(vbs_state(&json!({ "vbs": 2, "vbsRunning": [0], "hypervisor": true })), Vbs::Idle);
+        assert_eq!(vbs_state(&json!({ "vbs": 2, "vbsRunning": [0, 2] })), Vbs::On(vec!["Integridad de memoria"]));
+        assert_eq!(vbs_state(&json!({ "vbs": 2, "vbsRunning": [2] })), Vbs::On(vec!["Integridad de memoria"]));
+        assert_eq!(vbs_state(&json!({ "vbs": 2, "vbsRunning": [1, 2, 4] })), Vbs::On(vec!["Credential Guard", "Integridad de memoria", "Protección de pila"]));
+        assert_eq!(vbs_state(&json!({ "vbs": 0, "vbsRunning": [] })), Vbs::Off);
+        assert_eq!(vbs_state(&json!({ "vbs": 1, "vbsRunning": [2] })), Vbs::Off, "habilitada pero sin correr");
+        assert_eq!(vbs_state(&json!({ "vbs": 2 })), Vbs::Legacy, "escaneo guardado por una versión vieja");
+        assert_eq!(vbs_state(&json!({})), Vbs::Off);
+    }
+
+    #[test]
+    fn el_hallazgo_de_vbs_depende_de_las_funciones() {
+        let titulo = |vbs: serde_json::Value| {
+            let mut spec = json!({ "sysDrive": "C", "laptop": false, "reserved": "", "hags": 2, "planGuid": "x", "plan": "x", "cpu": { "name": "x", "cores": 6, "l3MB": 32 }, "gpus": [{ "name": "x", "vramGB": 8 }],
+                "ram": { "gb": 16, "modules": [] }, "disks": [], "vols": [{ "letter": "C", "freeGB": 400 }], "os": { "uptimeH": 1 }, "nics": [] });
+            for (k, v) in vbs.as_object().unwrap() { spec[k] = v.clone(); }
+            let f = facts(&spec);
+            findings(&spec, &f).into_iter().find(|x| x.1.contains("VBS")).map(|x| (x.0, x.1)).unwrap()
+        };
+        assert_eq!(titulo(json!({ "vbs": 2, "vbsRunning": [], "hypervisor": true })), ("ok", "VBS sin funciones activas".to_string()));
+        assert_eq!(titulo(json!({ "vbs": 2, "vbsRunning": [0], "hypervisor": true })), ("ok", "VBS sin funciones activas".to_string()));
+        assert_eq!(titulo(json!({ "vbs": 2, "vbsRunning": [2] })), ("warn", "VBS activa: Integridad de memoria".to_string()));
+        assert_eq!(titulo(json!({ "vbs": 0 })), ("ok", "VBS desactivada".to_string()));
+        assert_eq!(titulo(json!({ "vbs": 2 })).0, "warn");
     }
 
     #[test]

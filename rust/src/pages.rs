@@ -591,7 +591,7 @@ impl App {
             row("Versión", format!("{} (build {})", s(&os["ver"]), s(&os["build"]))),
             row("Encendida hace", format!("{} h", n(&os["uptimeH"]))),
             row("Plan de energía", s(&spec["plan"]).into()),
-            row("VBS", if n(&spec["vbs"]) == 2.0 { "Activa" } else { "Inactiva" }.into()),
+            row("VBS", match sys::vbs_state(&spec) { sys::Vbs::On(_) | sys::Vbs::Legacy => "Activa", sys::Vbs::Idle => "Sin funciones activas", sys::Vbs::Off => "Inactiva" }.into()),
             row("HAGS", if n(&spec["hags"]) == 2.0 { "Activado" } else { "Desactivado" }.into()),
             row("Administrador", if self.admin { "Sí" } else { "No" }.into()),
         ], vec![]));

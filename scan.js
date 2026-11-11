@@ -61,6 +61,8 @@ $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
   bios = "$($bios.SMBIOSBIOSVersion) ($(if ($bios.ReleaseDate) { $bios.ReleaseDate.ToString('yyyy-MM-dd') }))"
   os = [ordered]@{ name = $os.Caption; ver = $nt.DisplayVersion; build = "$($os.BuildNumber).$($nt.UBR)"; uptimeH = [math]::Round(((Get-Date) - $os.LastBootUpTime).TotalHours, 1) }
   vbs = [int]$dg.VirtualizationBasedSecurityStatus
+  vbsRunning = @($dg.SecurityServicesRunning | ForEach-Object { [int]$_ })
+  hypervisor = [bool]$cs.HypervisorPresent
   hags = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers').HwSchMode
   plan = $plan.Trim()
   reserved = $(try { [string](Get-WindowsReservedStorageState -ErrorAction Stop).ReservedStorageState } catch { '' })

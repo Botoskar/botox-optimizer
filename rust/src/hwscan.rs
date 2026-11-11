@@ -168,7 +168,9 @@ pub fn scan() -> Result<Value, String> {
     let first = |v: Vec<Value>| v.into_iter().next().unwrap_or_default();
 
     let cpu = first(rows(&cim, "SELECT Name, Manufacturer, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed, L3CacheSize FROM Win32_Processor"));
-    let cs = first(rows(&cim, "SELECT TotalPhysicalMemory FROM Win32_ComputerSystem"));
+    let cs = first(rows(&cim, "SELECT TotalPhysicalMemory, HypervisorPresent FROM Win32_ComputerSystem"));
+    // VBS: el estado 2 solo dice que el hipervisor corre (Hyper-V, WSL2 y Docker lo mantienen); lo que importa es qué funciones lo usan.
+    let dg = first(rows(&guard, "SELECT VirtualizationBasedSecurityStatus, SecurityServicesRunning FROM Win32_DeviceGuard"));
     let os = first(rows(&cim, "SELECT Caption, BuildNumber, LastBootUpTime FROM Win32_OperatingSystem"));
     let board = first(rows(&cim, "SELECT Manufacturer, Product FROM Win32_BaseBoard"));
     let bios = first(rows(&cim, "SELECT SMBIOSBIOSVersion, ReleaseDate FROM Win32_BIOS"));
@@ -246,7 +248,9 @@ pub fn scan() -> Result<Value, String> {
         "board": join(&board["Manufacturer"], &board["Product"]),
         "bios": format!("{} ({})", text(&bios["SMBIOSBIOSVersion"]), wmi_date(bios["ReleaseDate"].as_str().unwrap_or_default())),
         "os": { "name": os["Caption"], "ver": reg_text(nt, "DisplayVersion"), "build": format!("{}.{}", text(&os["BuildNumber"]), reg_num(nt, "UBR").unwrap_or(0.0)), "uptimeH": rnd(uptime, 1) },
-        "vbs": first(rows(&guard, "SELECT VirtualizationBasedSecurityStatus FROM Win32_DeviceGuard"))["VirtualizationBasedSecurityStatus"].as_f64().unwrap_or(0.0) as i64,
+        "vbs": dg["VirtualizationBasedSecurityStatus"].as_f64().unwrap_or(0.0) as i64,
+        "vbsRunning": dg["SecurityServicesRunning"].as_array().cloned().unwrap_or_default(),
+        "hypervisor": cs["HypervisorPresent"] == true,
         "hags": reg_num(r"HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers", "HwSchMode"),
         "plan": plan,
         "reserved": reserved,
@@ -334,6 +338,7 @@ mod tests {
         let guid = text(&spec["planGuid"]);
         assert!(guid.len() == 36 && guid.chars().all(|c| c.is_ascii_hexdigit() || c == '-'), "{guid}");
         assert!(!text(&spec["plan"]).is_empty());
+        assert!(spec["vbsRunning"].is_array() && spec["hypervisor"].is_boolean(), "VBS: {} {}", spec["vbsRunning"], spec["hypervisor"]);
         // Lo que consume la app: los hechos y los hallazgos se arman sin fallar con el escaneo nativo.
         let f = crate::sys::facts(&spec);
         assert!(f.ram_gb >= 1 && !crate::sys::findings(&spec, &f).is_empty());
