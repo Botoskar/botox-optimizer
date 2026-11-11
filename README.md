@@ -10,6 +10,12 @@ Optimizador de FPS y latencia para PC gamer con Windows 10/11. App nativa en Rus
 - **Visibilidad:** este repositorio de código (`Botoskar/botox-optimizer`) es **público a propósito**. No tiene claves ni secretos, y no tiene que tenerlos: la clave privada de firma nunca se sube (ver "Sacar una versión nueva"). Sin `LICENSE`, que el código se vea no da permiso para reutilizarlo; ver `LICENSE-PROPUESTA.md`.
 - `THIRD-PARTY-NOTICES.md`: licencias de lo que va dentro del `.exe` (Poppins bajo SIL OFL 1.1 y las dependencias). `SECURITY.md`: cómo reportar vulnerabilidades. `docs/DISENO-MOTOR-ELEVADO.md`: propuesta para separar la interfaz del motor elevado.
 
+## Si algo sale mal
+
+- **Revertir todo:** en Backups, o con **Ctrl+Shift+R** desde cualquier sección. Pide confirmación antes de tocar nada.
+- **Modo seguro:** `"Botox Optimizer.exe" --safe` abre la app mostrando solo Backups. Ahí se puede revertir, crear un punto de restauración y reiniciar, pero no aplicar nada. En Backups hay un botón para copiar el comando.
+- **Sin ventana:** `"Botox Optimizer.exe" --revert-all` muestra qué revertiría, sin tocar nada. `--revert-all --yes` lo revierte y avisa el resultado en una ventanita. No corre si la app está abierta ni en modo prueba.
+
 ## Compilar
 
 El toolchain (Rust + mingw64) está en `M:\Github Things\botox-optimizer-rust` y no está en el PATH. `rust/cargo.cmd` lo configura:

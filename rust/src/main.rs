@@ -162,6 +162,8 @@ pub struct App {
     pub verifying: bool,
     /// La ventana tenía el foco en el cuadro anterior (para re-verificar al volver a ella).
     had_focus: bool,
+    /// `--safe`: modo de recuperación, solo se puede revertir.
+    pub safe: bool,
 }
 
 fn main() -> eframe::Result {
@@ -190,6 +192,19 @@ fn main() -> eframe::Result {
         let spec = if args.get(i + 1).is_some_and(|a| a == "ps") { sys::scan_ps(&Catalog::load()) } else { hwscan::scan() };
         eprintln!("escaneo: {} ms", t0.elapsed().as_millis());
         println!("{}", spec.map_or_else(|e| format!("{{\"error\":{}}}", Value::String(e)), |v| v.to_string()));
+        return Ok(());
+    }
+    // Emergencia sin interfaz: revierte todo lo que hizo la app (por si la ventana no abre). Va antes de on_start: una
+    // corrida sin ventana justo después de actualizar dejaría el marcador en "1" y el próximo arranque volvería atrás.
+    if args.iter().any(|a| a == "--revert-all") {
+        if sys::fake_kind().is_some() {
+            win::message("En modo prueba (BX_FAKE) no se revierte nada.", true);
+        } else if !win::single_instance() {
+            win::message("Botox Optimizer está abierto: cerralo y repetí, o usá \"Revertir todo\" en Backups.", true);
+        } else {
+            let (ok, msg) = revert_all_cli(args.iter().any(|a| a == "--yes"));
+            win::message(&msg, !ok);
+        }
         return Ok(());
     }
     // Las copias de prueba (BX_FAKE, capturas) no cambian nada en la PC: pueden abrirse junto a la app real y no tocan
@@ -238,6 +253,63 @@ fn install_panic_log() {
         let _ = file.and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()));
         prev(info);
     }));
+}
+
+/// Tweaks activos que la app puede revertir: tienen respaldo o se activaron desde acá. Lo usan "Revertir todo" y
+/// `--revert-all`.
+fn reversible_ids(cat: &Catalog, is_on: &dyn Fn(&str) -> bool, backups: &[(String, std::time::SystemTime)], applied: &HashSet<String>) -> Vec<String> {
+    let mut ids: Vec<String> = backups.iter().map(|b| b.0.trim_end_matches("-nic").to_string()).chain(applied.iter().cloned()).filter(|id| is_on(id) && cat.tweak(id).is_some()).collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// Modo seguro (`--safe`): solo revertir, crear o abrir puntos de restauración, mirar y reiniciar. Un interruptor solo
+/// se puede tocar si está encendido (o sea, para revertirlo).
+fn safe_allows(a: &Action, is_on: &dyn Fn(&str) -> bool) -> bool {
+    match a {
+        Action::Go(p, _) => *p == Page::Backup,
+        Action::Toggle(id) | Action::ToggleNow(id) => is_on(id),
+        Action::RevertAll | Action::ManyNow(_) | Action::CreateRestore | Action::OpenRestore | Action::Cancel | Action::Reboot | Action::RebootNow | Action::Rescan | Action::Verify => true,
+        _ => false,
+    }
+}
+
+/// `--revert-all`: lee el estado real, revierte todo lo reversible y deja un resumen. Sin `--yes` solo dice qué haría.
+fn revert_all_cli(yes: bool) -> (bool, String) {
+    if !engine::is_admin() {
+        return (false, "Para revertir hay que abrirlo como administrador.".into());
+    }
+    let cat = Catalog::load();
+    let mut state = engine::check_all_native(&cat);
+    state.extend(engine::check_all_ps(&cat));
+    let mut saved = load_saved();
+    let ids = reversible_ids(&cat, &|id| state.get(id) == Some(&true), &engine::backups(), &saved.applied);
+    if ids.is_empty() {
+        return (true, "No hay cambios de Botox Optimizer para revertir.".into());
+    }
+    let names: Vec<String> = ids.iter().filter_map(|id| cat.tweak(id)).map(|t| format!("• {}", t.name)).collect();
+    if !yes {
+        return (true, format!("Se revertirían {} cambios:\n{}\n\nPara hacerlo, repetí el comando con --revert-all --yes", ids.len(), names.join("\n")));
+    }
+    let mut fails = vec![];
+    for id in &ids {
+        let t = cat.tweak(id).unwrap();
+        let d = engine::toggle(&cat, t, false, &Log(None));
+        saved.state.insert(id.clone(), d.state);
+        if d.ok && !d.state {
+            saved.applied.remove(id);
+        } else {
+            fails.push(format!("• {}: {}", t.name, if d.ok { "Windows todavía no refleja el cambio (puede requerir reinicio)" } else { &d.err }));
+        }
+    }
+    let _ = write_atomic(&saved_path(), serde_json::to_string(&saved).unwrap().as_bytes());
+    let ok = ids.len() - fails.len();
+    if fails.is_empty() {
+        (true, format!("Listo: se revirtieron {ok} cambios. Reiniciá la PC para terminar."))
+    } else {
+        (false, format!("Se revirtieron {ok} de {}. Fallaron:\n{}", ids.len(), fails.join("\n")))
+    }
 }
 
 /// Ícono y texto de un aviso en un solo bloque: un layout horizontal acá se estira a toda la altura.
@@ -370,7 +442,11 @@ impl App {
             states_at: None,
             verifying: false,
             had_focus: true,
+            safe: std::env::args().any(|a| a == "--safe"),
         };
+        if app.safe {
+            app.page = Page::Backup;
+        }
         app.load_all();
         // Arranque instantáneo: muestra lo último que se supo de la PC; los datos frescos llegan en segundos.
         if let Some(spec) = app.saved.spec.clone() {
@@ -441,7 +517,17 @@ impl App {
         });
     }
 
-    fn act(&mut self, a: Action) {
+    fn act(&mut self, mut a: Action) {
+        if self.safe {
+            if !safe_allows(&a, &|id| self.on(id)) {
+                self.toast("Modo seguro: solo se pueden revertir los cambios de Botox Optimizer.", ACCENT, 4.0);
+                return;
+            }
+            // Un lote en modo seguro solo revierte: lo que ya está apagado no se vuelve a aplicar.
+            if let Action::ManyNow(ids) = &mut a {
+                ids.retain(|id| self.state.get(id) == Some(&true));
+            }
+        }
         // En modo de prueba solo se puede mirar: ni tweaks, ni limpiezas, ni reinicios, ni actualizaciones, aunque la app tenga permisos de administrador.
         if self.fake.is_some() && !matches!(a, Action::Go(..) | Action::Rescan | Action::RescanStartup | Action::Verify) {
             self.toast("Modo prueba: con hardware simulado no se aplica nada en la PC.", ACCENT, 3.5);
@@ -587,12 +673,7 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
     }
 
     /// Tweaks activos que la app puede revertir: tienen respaldo o se activaron desde acá.
-    pub fn reversible(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self.backups.iter().map(|b| b.0.trim_end_matches("-nic").to_string()).chain(self.saved.applied.iter().cloned()).filter(|id| self.on(id) && self.cat.tweak(id).is_some()).collect();
-        ids.sort();
-        ids.dedup();
-        ids
-    }
+    pub fn reversible(&self) -> Vec<String> { reversible_ids(&self.cat, &|id| self.on(id), &self.backups, &self.saved.applied) }
 
     pub fn refresh_backups(&mut self) {
         self.backups = engine::backups();
@@ -858,7 +939,11 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
         ui.painter().text(brand.left_center() + Vec2::new(77.0, 13.0), Align2::LEFT_CENTER, "OPTIMIZER", semi(10.5), ACCENT);
         ui.add_space(6.0);
         for (i, (page, icon, name)) in NAV.iter().enumerate() {
-            if i == 6 {
+            // Modo seguro: solo Backups.
+            if self.safe && *page != Page::Backup {
+                continue;
+            }
+            if i == 6 && !self.safe {
                 let (r, _) = ui.allocate_exact_size(Vec2::new(full.width(), 10.0), Sense::hover());
                 ui.painter().hline(r.x_range().shrink(22.0), r.center().y, egui::Stroke::new(1.0_f32, LINE));
             }
@@ -911,6 +996,10 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::J)) {
             self.saved.console_open = !self.saved.console_open;
             self.save();
+        }
+        // Ctrl+Shift+R: "Revertir todo" desde cualquier sección (con la confirmación de siempre).
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::R)) {
+            self.actions.push(Action::RevertAll);
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F5)) {
             self.actions.push(Action::Rescan);
@@ -1224,4 +1313,37 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) { App::save(self); }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn modo_seguro_solo_deja_revertir() {
+        let on = |id: &str| id == "gamemode";
+        for a in [Action::RevertAll, Action::CreateRestore, Action::OpenRestore, Action::Go(Page::Backup, None), Action::Toggle("gamemode".into()), Action::Reboot, Action::Verify] {
+            assert!(safe_allows(&a, &on));
+        }
+        // Encender algo apagado, aplicar en lote, limpiar, actualizar o ir a otra sección: no.
+        for a in [Action::Toggle("hags".into()), Action::ToggleNow("hags".into()), Action::Many(vec!["hags".into()], "aplicar"), Action::RunBoost("temp".into()), Action::UpdateNow, Action::Go(Page::Tweaks, None), Action::Startup(0)] {
+            assert!(!safe_allows(&a, &on));
+        }
+    }
+
+    #[test]
+    fn revertible_es_lo_activo_con_respaldo_o_aplicado_desde_aca() {
+        let cat = Catalog::load();
+        let t = std::time::SystemTime::now();
+        let backups = vec![("gamemode".to_string(), t), ("niclatency-nic".to_string(), t), ("no-existe".to_string(), t)];
+        let applied: HashSet<String> = ["hags".to_string(), "gamedvr".to_string()].into();
+        let ids = reversible_ids(&cat, &|id| id != "gamedvr", &backups, &applied);
+        // gamedvr está apagado; un id que no es del catálogo se ignora; "-nic" se une con su tweak.
+        let mut expected: Vec<String> = ["gamemode", "hags"].iter().map(|s| s.to_string()).collect();
+        if cat.tweak("niclatency").is_some() {
+            expected.push("niclatency".into());
+        }
+        expected.sort();
+        assert_eq!(ids, expected);
+    }
 }

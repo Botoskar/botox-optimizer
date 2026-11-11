@@ -390,6 +390,12 @@ extern "system" {
 
 fn wide(s: &str) -> Vec<u16> { s.encode_utf16().chain([0]).collect() }
 
+/// Ventana de aviso de Windows (para los modos sin interfaz: el .exe de release no tiene consola).
+pub fn message(text: &str, error: bool) {
+    // 0x10 = MB_ICONERROR, 0x40 = MB_ICONINFORMATION
+    unsafe { MessageBoxW(0, wide(text).as_ptr(), wide("Botox Optimizer").as_ptr(), if error { 0x10 } else { 0x40 }) };
+}
+
 /// Instancia única: dos ventanas elevadas tocando registro, servicios y respaldos a la vez se pisan.
 /// Mutex con nombre en `Local\` (por sesión; no un archivo en una carpeta escribible). Si ya hay otra, la trae al frente
 /// (o avisa) y devuelve false. Reintenta unos segundos: al actualizar, la versión vieja abre la nueva y recién ahí se cierra.

@@ -103,6 +103,17 @@ impl App {
             });
             return;
         }
+        if self.safe {
+            egui::Frame::new().fill(Color32::from_rgb(20, 34, 67)).stroke(Stroke::new(1.0_f32, BLUE)).corner_radius(12).inner_margin(egui::Margin::symmetric(18, 9)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(ic::LIFEBUOY).size(18.0).color(BLUE));
+                    ui.label(RichText::new("Modo seguro").font(semi(14.0)));
+                    ui.label(muted("Solo se pueden revertir los cambios hechos por Botox Optimizer. Cerrá y abrí la app normal para volver."));
+                });
+            });
+            ui.add_space(10.0);
+        }
         if let Some(k) = self.fake.clone() {
             let (que, tip) = match k.as_str() {
                 "amd" => ("Ryzen 7 5700 + Radeon RX 7600", "Como la PC de un amigo con Radeon."),
@@ -840,6 +851,28 @@ impl App {
                 let mut right = ui.new_child(UiBuilder::new().max_rect(r.shrink2(Vec2::new(16.0, 0.0))).layout(Layout::right_to_left(Align::Center)));
                 self.switch(&mut right, t);
             }
+        });
+        ui.add_space(10.0);
+        // La salida de emergencia, visible antes de necesitarla.
+        let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "Botox Optimizer.exe".into());
+        let safe_cmd = format!("\"{exe}\" --safe");
+        panel().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(ic::LIFEBUOY).size(20.0).color(BLUE));
+                title(ui, "¿Algo salió mal?");
+            });
+            ui.add(Label::new(muted("\"Revertir todo\" deja cada ajuste como estaba (también con Ctrl+Shift+R desde cualquier sección). Si la app no te deja hacerlo, abrila en modo seguro, donde solo se puede revertir:")).wrap());
+            ui.horizontal(|ui| {
+                egui::Frame::new().fill(CHIP_BG).stroke(Stroke::new(1.0_f32, LINE)).corner_radius(8).inner_margin(egui::Margin::symmetric(12, 7)).show(ui, |ui| {
+                    ui.add(Label::new(RichText::new(&safe_cmd).font(mono(12.5))).truncate());
+                });
+                if button(ui, "Copiar", Btn::Ghost).clicked() {
+                    ui.ctx().copy_text(safe_cmd.clone());
+                    self.toast("Comando copiado: pegalo en Ejecutar (Win+R)", GREEN, 4.0);
+                }
+            });
+            ui.label(RichText::new("Si ni la ventana abre: el mismo comando con --revert-all --yes revierte todo sin abrirla.").size(12.5).color(DIM));
         });
     }
 }
