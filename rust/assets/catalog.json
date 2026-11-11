@@ -265,7 +265,7 @@
    "id": "mmcss",
    "cat": "fps",
    "name": "Prioridad MMCSS alta para juegos",
-   "desc": "Sube la prioridad de CPU, GPU y E/S de la tarea \"Games\" del programador multimedia de Windows.",
+   "desc": "Pasa la tarea \"Games\" del programador multimedia (MMCSS) a categoría High y E/S alta. Solo afecta a los juegos que se registran en MMCSS como \"Games\".",
    "risk": "low",
    "reboot": false,
    "debloat": false,
@@ -311,7 +311,7 @@
    ],
    "pwr": [],
    "ps": null,
-   "details": "Cambia la tarea \"Games\" de MMCSS: Priority 6, Scheduling Category High, SFIO Priority High y GPU Priority 8. Según Microsoft, GPU Priority todavía no se usa y, con categoría High, Priority se toma siempre como 2.",
+   "details": "Cambia la tarea \"Games\" de MMCSS: Scheduling Category High (prioridad de hilo 23 a 26 en vez de 16 a 22), SFIO Priority High, Priority 6 y GPU Priority 8. Según Microsoft, GPU Priority todavía no se usa (8 ya es el valor de Windows) y, con categoría High, Priority se toma siempre como 2: lo que cambia de verdad es la categoría y la E/S. Solo lo notan los programas que avisan a MMCSS que son un juego.",
    "source": "https://learn.microsoft.com/es-es/windows/win32/procthread/multimedia-class-scheduler-service"
   },
   {

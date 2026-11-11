@@ -24,7 +24,7 @@ fn ago_secs(secs: u64) -> String {
 /// `cat:x` toma una categoría entera. (ícono, problema, explicación, ids)
 const FIXES: &[(&str, &str, &str, &[&str])] = &[
     (ic::WAVE_SAWTOOTH, "El juego se tironea", "Microcortes aunque los FPS promedio estén bien.", &["fso", "windowedopt", "memcompress", "sysmain", "svchost", "lastaccess", "8dot3"]),
-    (ic::GAUGE, "Tengo menos FPS de los que debería", "El procesador o la placa de video no rinden todo lo que pueden.", &["ultimate", "gamemode", "hags", "gamedvr", "vbs", "powerthrottle", "cpuboost", "cpumin", "dynamictick"]),
+    (ic::GAUGE, "Tengo menos FPS de los que debería", "El procesador o la placa de video no rinden todo lo que pueden.", &["ultimate", "gamemode", "hags", "gamedvr", "vbs", "powerthrottle", "cpuboost", "cpumin"]),
     (ic::WIFI_HIGH, "Lag o ping alto en juegos online", "Retardo de red que agrega Windows por su cuenta.", &["nagle", "tcpparams", "qos", "netthrottle", "niclatency", "dns"]),
     (ic::HARD_DRIVES, "La PC está lenta de fondo", "Indexación, telemetría y apps que usan disco y CPU sin que las abras.", &["wsearch", "sysmain", "diagtrack", "telemetrytasks", "bgapps"]),
     (ic::TIMER, "Tarda en arrancar", "Además de esto, en Arranque podés apagar los programas que inician con Windows.", &["startupdelay"]),
