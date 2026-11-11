@@ -340,7 +340,7 @@
    ],
    "pwr": [],
    "ps": null,
-   "details": "Win32PrioritySeparation define cuánto tiempo de CPU recibe cada hilo y cuánto más recibe la ventana activa. 0x26 = intervalos cortos y variables, con el máximo extra para el primer plano. Windows usa 2.",
+   "details": "Win32PrioritySeparation define cuánto tiempo de CPU recibe cada hilo y cuánto más recibe la ventana activa. 0x26 = intervalos cortos y variables, con el máximo extra para el primer plano. Windows usa 2. La fuente es la referencia de TechNet de versiones viejas de Windows.",
    "source": "https://learn.microsoft.com/es-es/previous-versions/cc976120(v=technet.10)"
   },
   {
@@ -467,7 +467,7 @@
    ],
    "pwr": [],
    "ps": null,
-   "details": "Pone en 0 EnableVirtualizationBasedSecurity, la Integridad de memoria (HypervisorEnforcedCodeIntegrity) y LsaCfgFlags (Credential Guard). Es lo mismo que apagar \"Integridad de memoria\" en Seguridad de Windows.",
+   "details": "Pone en 0 EnableVirtualizationBasedSecurity, la Integridad de memoria (HypervisorEnforcedCodeIntegrity) y LsaCfgFlags (Credential Guard). Incluye apagar \"Integridad de memoria\" de Seguridad de Windows, pero también apaga VBS y Credential Guard.",
    "source": "https://learn.microsoft.com/es-es/windows/security/hardware-security/enable-virtualization-based-protection-of-code-integrity"
   },
   {
@@ -1241,7 +1241,7 @@
    ],
    "pwr": [],
    "ps": null,
-   "details": "OverlayTestMode = 5 en HKLM\\SOFTWARE\\Microsoft\\Windows\\Dwm apaga Multi-Plane Overlay. NVIDIA publica este mismo cambio para quien tiene parpadeos o pantallas negras. Necesita reiniciar.",
+   "details": "OverlayTestMode = 5 en HKLM\\SOFTWARE\\Microsoft\\Windows\\Dwm apaga Multi-Plane Overlay. NVIDIA publica un archivo .reg para apagar MPO si tenés parpadeos o pantallas negras. Necesita reiniciar.",
    "source": "https://nvidia.custhelp.com/app/answers/detail/a_id/5157"
   },
   {
@@ -1970,7 +1970,7 @@
     "revert": "$T=@('\\Microsoft\\Windows\\Application Experience\\Microsoft Compatibility Appraiser*','\\Microsoft\\Windows\\Application Experience\\ProgramDataUpdater','\\Microsoft\\Windows\\Application Experience\\MareBackup','\\Microsoft\\Windows\\Application Experience\\PcaPatchDbTask','\\Microsoft\\Windows\\Application Experience\\StartupAppTask','\\Microsoft\\Windows\\Customer Experience Improvement Program\\*','\\Microsoft\\Windows\\Autochk\\Proxy','\\Microsoft\\Windows\\DiskDiagnostic\\Microsoft-Windows-DiskDiagnosticDataCollector','\\Microsoft\\Windows\\Feedback\\Siuf\\*')\nTaskSet $T $true",
     "check": "$T=@('\\Microsoft\\Windows\\Application Experience\\Microsoft Compatibility Appraiser*','\\Microsoft\\Windows\\Application Experience\\ProgramDataUpdater','\\Microsoft\\Windows\\Application Experience\\MareBackup','\\Microsoft\\Windows\\Application Experience\\PcaPatchDbTask','\\Microsoft\\Windows\\Application Experience\\StartupAppTask','\\Microsoft\\Windows\\Customer Experience Improvement Program\\*','\\Microsoft\\Windows\\Autochk\\Proxy','\\Microsoft\\Windows\\DiskDiagnostic\\Microsoft-Windows-DiskDiagnosticDataCollector','\\Microsoft\\Windows\\Feedback\\Siuf\\*')\n$L=@()\n$c=@((TaskCheck $T) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
    },
-   "details": "Deshabilita estas tareas programadas: Microsoft Compatibility Appraiser, ProgramDataUpdater, MareBackup, PcaPatchDbTask y StartupAppTask (Application Experience), todas las de Customer Experience Improvement Program, AutochkProxy, DiskDiagnosticDataCollector y las de FeedbackSiuf.",
+   "details": "Deshabilita estas tareas programadas: Microsoft Compatibility Appraiser, ProgramDataUpdater, MareBackup, PcaPatchDbTask y StartupAppTask (Application Experience), todas las de Customer Experience Improvement Program, Autochk\\Proxy, DiskDiagnosticDataCollector y las de Feedback\\Siuf.",
    "source": null
   },
   {
@@ -1999,7 +1999,7 @@
    ],
    "pwr": [],
    "ps": null,
-   "details": "AdvertisingInfo\\Enabled = 0, el mismo valor que Microsoft documenta para apagar el ID de publicidad.",
+   "details": "AdvertisingInfo\\Enabled = 0 en tu usuario (HKCU), lo mismo que el interruptor de Privacidad. La fuente documenta el mismo valor en HKLM, más una directiva, para apagarlo en toda la PC.",
    "source": "https://learn.microsoft.com/es-es/windows/privacy/manage-connections-from-windows-operating-system-components-to-microsoft-services"
   },
   {
