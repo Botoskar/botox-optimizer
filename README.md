@@ -23,7 +23,7 @@ El toolchain (Rust + mingw64) está en `M:\Github Things\botox-optimizer-rust` y
 ```bash
 cd rust
 cmd //c ".\\cargo.cmd build"                         # desarrollo, sin admin (modo solo lectura)
-cmd //c ".\\cargo.cmd test"                          # 59 tests (nunca los corras elevado)
+cmd //c ".\\cargo.cmd test"                          # 60 tests (nunca los corras elevado)
 BX_ADMIN=1 cmd //c ".\\cargo.cmd build --release"    # versión para usar: pide administrador
 powershell -NoProfile -File tools\parse-ps.ps1       # sintaxis de los 113 scripts del catálogo, sin ejecutarlos
 ```

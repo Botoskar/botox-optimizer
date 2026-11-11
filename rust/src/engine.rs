@@ -261,21 +261,19 @@ fn revert_native(t: &Tweak, log: &Log) -> Result<(), String> {
     Ok(())
 }
 
-pub fn check_native(t: &Tweak) -> bool {
-    let reg_ok = if t.reg.is_empty() {
-        true
-    } else {
-        let mut any = false;
-        for e in live(t) {
-            any = true;
-            if !reg::get(&e.p, &e.n).is_some_and(|c| reg::fmt(&c.0) == reg::fmt(&e.v)) {
-                return false;
-            }
+/// Estado real de un tweak nativo. `None`: todo lo que toca son servicios que no existen en esta PC (no aplica).
+pub fn check_native(t: &Tweak) -> Option<bool> {
+    let mut any = !t.pwr.is_empty();
+    for e in live(t) {
+        any = true;
+        if !reg::get(&e.p, &e.n).is_some_and(|c| reg::fmt(&c.0) == reg::fmt(&e.v)) {
+            return Some(false);
         }
-        // Si todos los servicios del ajuste faltan en esta PC, no está aplicado (antes `all()` vacío daba true).
-        any
-    };
-    reg_ok && t.pwr.iter().all(|x| pwr_get(&x.sub, &x.set) == Some(x.v))
+    }
+    if !t.pwr.iter().all(|x| pwr_get(&x.sub, &x.set) == Some(x.v)) {
+        return Some(false);
+    }
+    any.then_some(true)
 }
 
 // ── PowerShell ──
@@ -409,7 +407,7 @@ pub fn cancel_all() {
 /// Estado real del tweak. `None`: en esta PC no hay nada que revisar (ni tareas, ni servicios, ni opciones de la placa).
 pub fn check(cat: &Catalog, t: &Tweak) -> Option<bool> {
     match &t.ps {
-        None => Some(check_native(t)),
+        None => check_native(t),
         Some(ps) => {
             let out = run_ps_with(&cat.prelude, &ps.check, &Log(None), T_CHECK, &[]).out;
             if out.trim_end().ends_with("na") { None } else { Some(out.trim_end().ends_with("True")) }
@@ -453,8 +451,17 @@ pub fn check_all_ps(cat: &Catalog) -> (HashMap<String, bool>, HashSet<String>) {
     })
 }
 
-pub fn check_all_native(cat: &Catalog) -> HashMap<String, bool> {
-    cat.tweaks.iter().filter(|t| t.native).map(|t| (t.id.clone(), check_native(t))).collect()
+/// Como `check_all_ps`: el estado y, aparte, los que no aplican en esta PC (su estado queda en `false`).
+pub fn check_all_native(cat: &Catalog) -> (HashMap<String, bool>, HashSet<String>) {
+    let mut na = HashSet::new();
+    let map = cat.tweaks.iter().filter(|t| t.native).map(|t| {
+        let c = check_native(t);
+        if c.is_none() {
+            na.insert(t.id.clone());
+        }
+        (t.id.clone(), c == Some(true))
+    }).collect();
+    (map, na)
 }
 
 /// Cambiar el registro no alcanza: el Explorador y otras apps leen sus ajustes al iniciar.
@@ -604,9 +611,9 @@ mod tests {
         t.pwr.clear();
         t.reg = vec![entry("A", json!(5), "DWord", json!(0)), entry("S", json!("y"), "String", Value::Null), entry("B", json!([1, 2, 255]), "Binary", Value::Null)];
 
-        assert!(!check_native(&t));
+        assert_eq!(check_native(&t), Some(false));
         apply_native(&t, &log).unwrap();
-        assert!(check_native(&t), "después de aplicar tiene que quedar activo");
+        assert_eq!(check_native(&t), Some(true), "después de aplicar tiene que quedar activo");
         assert!(reg::backup_path("test-tweak").exists(), "tiene que existir el respaldo");
         // Aplicar de nuevo no pisa el respaldo original.
         apply_native(&t, &log).unwrap();
@@ -648,12 +655,17 @@ mod tests {
     }
 
     #[test]
-    fn un_tweak_sin_objetivos_no_figura_aplicado() {
+    fn un_tweak_sin_objetivos_no_aplica() {
         let cat = Catalog::load();
         let mut t = cat.tweaks.iter().find(|t| t.native).unwrap().clone();
         t.pwr.clear();
-        t.reg = vec![RegEntry { p: r"HKLM:\SYSTEM\CurrentControlSet\Services\BotoxNoExiste".into(), n: "Start".into(), v: json!(4), t: "DWord".into(), def: json!(2), svc: true }];
-        assert!(!check_native(&t), "si el servicio no existe, no está aplicado");
+        let gone = RegEntry { p: r"HKLM:\SYSTEM\CurrentControlSet\Services\BotoxNoExiste".into(), n: "Start".into(), v: json!(4), t: "DWord".into(), def: json!(2), svc: true };
+        t.reg = vec![gone.clone()];
+        // Ni activo ni apagado: si el servicio no existe, en esta PC no hay nada que cambiar.
+        assert_eq!(check_native(&t), None);
+        // Con algo más que sí existe y no está aplicado, cuenta lo que existe.
+        t.reg.push(RegEntry { p: KEY.into(), n: "NoEsta".into(), v: json!(1), t: "DWord".into(), def: Value::Null, svc: false });
+        assert_eq!(check_native(&t), Some(false));
     }
 
     #[test]

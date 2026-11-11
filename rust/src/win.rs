@@ -446,6 +446,36 @@ pub fn test_env(_k: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// Los respaldos tienen que seguir legibles para un administrador después de endurecer la carpeta, y los que dejó
+    /// la versión con `/T` (sin ningún permiso) se reparan. Necesita admin: corre en la CI de GitHub (que es admin) y
+    /// localmente se saltea, porque los tests nunca se corren elevados.
+    #[test]
+    fn endurecer_deja_los_respaldos_legibles_y_repara_los_rotos() {
+        if !crate::engine::is_admin() {
+            assert!(std::env::var_os("GITHUB_ACTIONS").is_none(), "en la CI los tests corren como administrador: este no se puede saltear");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("bx-harden-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let icacls = |args: &[&str]| assert!(secure_command(system32_exe("icacls.exe")).arg(&dir).args(args).output().unwrap().status.success(), "icacls {args:?}");
+        // harden_dir exige que la carpeta sea de Administradores, como la de ProgramData que crea la app elevada.
+        icacls(&["/setowner", "*S-1-5-32-544", "/Q"]);
+        std::fs::write(dir.join("a.json"), "1").unwrap();
+        std::fs::write(dir.join("b.json"), "2").unwrap();
+        // Así quedaban con el comando viejo: con dos respaldos o más, cada archivo sin ningún permiso.
+        icacls(&["/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "/T", "/Q"]);
+        assert!(std::fs::read(dir.join("a.json")).is_err(), "reproduce el respaldo ilegible");
+        harden_dir(&dir).unwrap();
+        // Un respaldo nuevo y otra pasada (lo que pasa cada vez que se guarda uno): todos siguen legibles.
+        std::fs::write(dir.join("c.json"), "3").unwrap();
+        harden_dir(&dir).unwrap();
+        for (f, v) in [("a.json", "1"), ("b.json", "2"), ("c.json", "3")] {
+            assert_eq!(std::fs::read_to_string(dir.join(f)).unwrap(), v, "{f}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn rutas_del_sistema() {
         assert!(system32().is_dir(), "{}", system32().display());

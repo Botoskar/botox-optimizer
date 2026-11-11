@@ -41,7 +41,7 @@ const NAV: [(Page, &str, &str); 7] = [
 pub enum Msg {
     Scan(Result<Value, String>),
     /// Estados de tweaks. `ps` = es la tanda de PowerShell (la lenta).
-    /// `na`: los que no aplican en esta PC (solo los trae la tanda de PowerShell).
+    /// `na`: los de esta tanda que no aplican en esta PC.
     States { map: HashMap<String, bool>, ps: bool, na: HashSet<String> },
     Toggled { id: String, on: bool, done: engine::Done, quiet: bool },
     /// Re-chequeo de un solo tweak al pasar el mouse por su interruptor. `None` = no aplica en esta PC.
@@ -196,7 +196,7 @@ fn main() -> eframe::Result {
     if std::env::args().any(|a| a == "--check") {
         let cat = Catalog::load();
         let t0 = Instant::now();
-        let mut all = engine::check_all_native(&cat);
+        let mut all = engine::check_all_native(&cat).0;
         let native_ms = t0.elapsed().as_millis();
         all.extend(engine::check_all_ps(&cat).0);
         eprintln!("nativos: {native_ms} ms · total: {} ms · admin: {}", t0.elapsed().as_millis(), engine::is_admin());
@@ -302,7 +302,7 @@ fn revert_all_cli(yes: bool) -> (bool, String) {
         return (false, "Para revertir hay que abrirlo como administrador.".into());
     }
     let cat = Catalog::load();
-    let mut state = engine::check_all_native(&cat);
+    let mut state = engine::check_all_native(&cat).0;
     state.extend(engine::check_all_ps(&cat).0);
     let mut saved = load_saved();
     let ids = reversible_ids(&cat, &|id| state.get(id) == Some(&true), &engine::backups(), &saved.applied);
@@ -509,7 +509,7 @@ impl App {
         self.scan_err = None;
         self.ps_ready = false;
         self.spawn(|tx, _, cat| { let _ = tx.send(Msg::Scan(sys::scan(&cat))); });
-        self.spawn(|tx, _, cat| { let _ = tx.send(Msg::States { map: engine::check_all_native(&cat), ps: false, na: HashSet::new() }); });
+        self.spawn(|tx, _, cat| { let _ = tx.send({ let (map, na) = engine::check_all_native(&cat); Msg::States { map, ps: false, na } }); });
         self.spawn(|tx, _, cat| { let _ = tx.send({ let (map, na) = engine::check_all_ps(&cat); Msg::States { map, ps: true, na } }); });
     }
 
@@ -676,7 +676,7 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
             Action::Verify if self.verifying || !self.ps_ready => {}
             Action::Verify => {
                 self.verifying = true;
-                self.spawn(|tx, _, cat| { let _ = tx.send(Msg::States { map: engine::check_all_native(&cat), ps: false, na: HashSet::new() }); });
+                self.spawn(|tx, _, cat| { let _ = tx.send({ let (map, na) = engine::check_all_native(&cat); Msg::States { map, ps: false, na } }); });
                 self.spawn(|tx, _, cat| { let _ = tx.send({ let (map, na) = engine::check_all_ps(&cat); Msg::States { map, ps: true, na } }); });
             }
             Action::Cancel => {
@@ -751,10 +751,12 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
             }
             Msg::Scan(Err(e)) => self.scan_err = Some(e),
             Msg::States { map, ps, na } => {
+                // Cada tanda (nativa o PowerShell) renueva los "no aplica" de sus propios tweaks.
+                self.facts.na.retain(|id| !map.contains_key(id));
+                self.facts.na.extend(na);
                 self.state.extend(map);
                 self.ps_ready |= ps;
                 if ps {
-                    self.facts.na = na;
                     self.states_at = Some(Instant::now());
                     self.verifying = false;
                 }
