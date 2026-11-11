@@ -393,7 +393,7 @@ const TWEAKS = [
     apply: String.raw`$b=@(foreach($a in Nics){ $g=(Get-NetAdapter -Name $a.Name).InterfaceGuid; [pscustomobject]@{ i=$a.ifIndex; ns=[string](Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$g").NameServer } }); Save-Bk 'dns' $b; foreach($a in Nics){ Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -ServerAddresses '1.1.1.1','1.0.0.1' }; Clear-DnsClientCache`,
     revert: String.raw`$b=Read-Bk 'dns'; if($null -eq $b){ foreach($a in Nics){ Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -ResetServerAddresses } } else { foreach($x in $b){ if($x.ns){ Set-DnsClientServerAddress -InterfaceIndex $x.i -ServerAddresses ($x.ns -split '[ ,]+') } else { Set-DnsClientServerAddress -InterfaceIndex $x.i -ResetServerAddresses } } }; Remove-Bk 'dns'; Clear-DnsClientCache`,
     // @() obligatorio: con un solo adaptador PowerShell devuelve un CimInstance y su .Count queda vacío.
-    pre: '$n=@(Nics)', check: String.raw`$n.Count -gt 0 -and @($n | Where-Object { (Get-DnsClientServerAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4).ServerAddresses[0] -ne '1.1.1.1' }).Count -eq 0` },
+    pre: '$n=@(Nics)', check: String.raw`$n.Count -gt 0 -and @($n | Where-Object { (Get-DnsClientServerAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses[0] -ne '1.1.1.1' }).Count -eq 0` },
 
   // ───────────── GPU ─────────────
   { id: 'gpumsi', cat: 'gpu', name: 'Modo MSI para la GPU', reboot: true, needs: s => !!s.gpuVendor, rec: s => !!s.gpuVendor,
