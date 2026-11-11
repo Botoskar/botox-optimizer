@@ -72,6 +72,8 @@ pub enum Action {
     /// Enciende o apaga el programa de arranque que está en esa posición de la lista.
     Startup(usize),
     RescanStartup,
+    /// Vuelve a leer el estado de los tweaks sin borrar el que se muestra (no reescanea el hardware).
+    Verify,
     /// Pide confirmación para instalar la versión nueva; UpdateNow la instala.
     Update,
     UpdateNow,
@@ -155,6 +157,11 @@ pub struct App {
     pub focus_search: bool,
     /// "Optimizar para juegos" incluye también las de riesgo medio (casilla en Inicio).
     pub one_click_medium: bool,
+    /// Cuándo terminó la última lectura completa del estado de los tweaks, y si hay una en curso.
+    pub states_at: Option<Instant>,
+    pub verifying: bool,
+    /// La ventana tenía el foco en el cuadro anterior (para re-verificar al volver a ella).
+    had_focus: bool,
 }
 
 fn main() -> eframe::Result {
@@ -360,6 +367,9 @@ impl App {
             page_at: Instant::now(),
             focus_search: false,
             one_click_medium: false,
+            states_at: None,
+            verifying: false,
+            had_focus: true,
         };
         app.load_all();
         // Arranque instantáneo: muestra lo último que se supo de la PC; los datos frescos llegan en segundos.
@@ -433,7 +443,7 @@ impl App {
 
     fn act(&mut self, a: Action) {
         // En modo de prueba solo se puede mirar: ni tweaks, ni limpiezas, ni reinicios, ni actualizaciones, aunque la app tenga permisos de administrador.
-        if self.fake.is_some() && !matches!(a, Action::Go(..) | Action::Rescan | Action::RescanStartup) {
+        if self.fake.is_some() && !matches!(a, Action::Go(..) | Action::Rescan | Action::RescanStartup | Action::Verify) {
             self.toast("Modo prueba: con hardware simulado no se aplica nada en la PC.", ACCENT, 3.5);
             return;
         }
@@ -544,6 +554,13 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
             // Mientras hay uno en curso no se lanza otro (Cancelar lo corta y libera).
             Action::Rescan if !self.ps_ready || (self.spec.is_none() && self.scan_err.is_none()) => self.toast("Ya hay un escaneo en curso", ACCENT, 2.5),
             Action::Rescan => self.load_all(),
+            // Con una lectura en curso (o el primer escaneo sin terminar) no se lanza otra.
+            Action::Verify if self.verifying || !self.ps_ready => {}
+            Action::Verify => {
+                self.verifying = true;
+                self.spawn(|tx, _, cat| { let _ = tx.send(Msg::States { map: engine::check_all_native(&cat), ps: false }); });
+                self.spawn(|tx, _, cat| { let _ = tx.send(Msg::States { map: engine::check_all_ps(&cat), ps: true }); });
+            }
             Action::Cancel => {
                 engine::cancel_all();
                 self.toast("Cancelando lo que está en curso…", ACCENT, 4.0);
@@ -595,6 +612,10 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
             Msg::States { map, ps } => {
                 self.state.extend(map);
                 self.ps_ready |= ps;
+                if ps {
+                    self.states_at = Some(Instant::now());
+                    self.verifying = false;
+                }
                 // También la tanda rápida: si se cierra antes de que llegue la de PowerShell, el próximo arranque
                 // muestra igual los estados nativos frescos.
                 self.saved.state = self.state.clone();
@@ -728,7 +749,7 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
             self.spawn(move |tx, _, _| { let (s, now) = sys::stats(prev); let _ = tx.send(Msg::Stats(s, now)); });
         }
         let loading = self.spec.is_none() && self.scan_err.is_none() || !self.ps_ready || self.restore.is_none() && self.page == Page::Backup;
-        if !self.busy.is_empty() || self.running > 0 || loading || self.stats_pending || !self.toasts.is_empty() {
+        if !self.busy.is_empty() || self.running > 0 || loading || self.verifying || self.stats_pending || !self.toasts.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(100));
         } else if watching {
             ctx.request_repaint_after(Duration::from_secs(2));
@@ -894,6 +915,12 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F5)) {
             self.actions.push(Action::Rescan);
         }
+        // Al volver a la ventana después de un rato, el estado se relee de fondo: pudo cambiar fuera de la app.
+        let focus = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        if focus && !self.had_focus && self.states_at.is_some_and(|t| t.elapsed() > Duration::from_secs(15 * 60)) {
+            self.actions.push(Action::Verify);
+        }
+        self.had_focus = focus;
         if !self.query.is_empty() && ctx.input(|i| i.key_pressed(Key::Escape)) {
             self.query.clear();
         }

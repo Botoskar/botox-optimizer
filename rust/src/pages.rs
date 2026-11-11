@@ -12,9 +12,20 @@ const CARD_H: f32 = 236.0;
 fn s(v: &Value) -> &str { v.as_str().unwrap_or_default() }
 fn n(v: &Value) -> f64 { v.as_f64().unwrap_or(0.0) }
 
-fn ago(unix: u64) -> String {
-    let m = unix_now().saturating_sub(unix) / 60;
+fn ago(unix: u64) -> String { ago_secs(unix_now().saturating_sub(unix)) }
+
+fn ago_secs(secs: u64) -> String {
+    let m = secs / 60;
     match m { 0 => "recién".into(), 1..=59 => format!("hace {m} min"), 60..=1439 => format!("hace {} h", m / 60), _ => format!("hace {} d", m / 1440) }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn hace_cuanto_en_palabras() {
+        use super::ago_secs;
+        assert_eq!([ago_secs(0), ago_secs(59), ago_secs(60), ago_secs(59 * 60 + 59), ago_secs(3600), ago_secs(23 * 3600 + 3599), ago_secs(86_400 * 3)], ["recién", "recién", "hace 1 min", "hace 59 min", "hace 1 h", "hace 23 h", "hace 3 d"]);
+    }
 }
 
 /// "AMD Ryzen 5 5600 6-Core Processor" → "AMD Ryzen 5 5600".
@@ -443,6 +454,7 @@ impl App {
             }
             self.search(ui);
         });
+        self.state_age(ui);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::splat(6.0);
             ui.spacing_mut().button_padding = Vec2::new(14.0, 6.0);
@@ -482,6 +494,25 @@ impl App {
                 }
             });
         }
+    }
+
+    /// "Estado leído hace X" y "Verificar ahora": lo que se cambie fuera de la app no se ve hasta releerlo.
+    fn state_age(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let text = match (self.verifying, self.states_at) {
+                (true, _) => "Verificando el estado…".to_string(),
+                (false, Some(t)) => format!("Estado leído {}", ago_secs(t.elapsed().as_secs())),
+                (false, None) => "Leyendo el estado…".to_string(),
+            };
+            ui.label(RichText::new(format!("{}  {text}", ic::CLOCK)).size(12.5).color(DIM)).on_hover_text("Los cambios hechos fuera de Botox Optimizer no se ven hasta que se vuelve a verificar. Pasa solo si volvés a la ventana después de 15 minutos.");
+            if self.verifying || !self.ps_ready {
+                ui.add(egui::Spinner::new().size(12.0).color(ACCENT));
+            } else if ui.add(Label::new(RichText::new("Verificar ahora").size(12.5).color(ACCENT2)).sense(Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                self.actions.push(Action::Verify);
+            }
+        });
+        ui.add_space(6.0);
     }
 
     /// Buscador con ícono, borde naranja al escribir y botón para borrar. Ctrl+F lo enfoca.
