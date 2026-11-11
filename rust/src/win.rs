@@ -500,7 +500,9 @@ mod tests {
              finally {{ Remove-Item -LiteralPath ('Cert:\\CurrentUser\\My\\' + $c.Thumbprint) -DeleteKey }}",
             exe.display()
         );
-        let out = std::process::Command::new(system32().join(r"WindowsPowerShell\v1.0\powershell.exe")).args(["-NoProfile", "-NonInteractive", "-Command", &script]).output().unwrap();
+        // secure_command fija el PSModulePath del sistema: heredado de pwsh 7 (runners de GitHub), PowerShell 5.1 no
+        // carga el módulo que crea la unidad Cert:.
+        let out = secure_command(system32().join(r"WindowsPowerShell\v1.0\powershell.exe")).args(["-NoProfile", "-NonInteractive", "-Command", &script]).output().unwrap();
         let thumb = String::from_utf8_lossy(&out.stdout).trim().to_string();
         assert!(out.status.success() && thumb.len() == 40, "no se pudo firmar: {thumb} {}", String::from_utf8_lossy(&out.stderr));
         // Raíz no confiable, pero la firma es íntegra: devuelve el firmante para compararlo con el pin.
