@@ -147,7 +147,7 @@ pub fn secure_command(exe: impl AsRef<Path>) -> Command {
         sys.join("Wbem"),
         sys.join(r"WindowsPowerShell\v1.0"),
         pf.join(r"NVIDIA Corporation\NVSMI"),
-        local.join(r"Microsoft\WindowsApps"), // winget (alias por usuario) del catálogo
+        // Sin %LOCALAPPDATA%\Microsoft\WindowsApps: es del usuario. winget se resuelve por ruta absoluta (WingetExe).
     ]);
     // Solo módulos del sistema: una ruta de módulos del perfil sería escribible por el usuario y
     // podría cargarse dentro de un proceso elevado (bypass de UAC).

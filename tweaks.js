@@ -52,6 +52,15 @@ function Del-RegVal($p, $n) {
   $o = Get-RegVal $p $n
   if ($o.e) { Remove-ItemProperty -LiteralPath $p -Name $n -ErrorAction SilentlyContinue; Log "$(Short $p)\$($n): $(Fmt $o) → (eliminado)" }
 }
+# winget por ruta absoluta dentro de Program Files\WindowsApps (protegida). El alias de %LOCALAPPDATA%\Microsoft\WindowsApps
+# está en una carpeta del usuario: un winget.exe falso ahí correría como administrador.
+function WingetExe {
+  $w = Get-AppxPackage Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue | Sort-Object Version -Descending |
+    ForEach-Object { Join-Path $_.InstallLocation 'winget.exe' } | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+  if (!$w) { throw 'No encontré winget (Instalador de aplicaciones de Microsoft). Instalá OneDrive desde la Microsoft Store.' }
+  $w
+}
+function MsSigned($f) { $s = Get-AuthenticodeSignature -LiteralPath $f; $s.Status -eq 'Valid' -and $s.SignerCertificate.Subject -match 'O=Microsoft Corporation' }
 function StopSvc($n) { $s = Get-Service $n -ErrorAction SilentlyContinue; if ($s -and $s.Status -eq 'Running') { Stop-Service $n -Force -ErrorAction SilentlyContinue; Log "Servicio $($n): detenido" } }
 function Skip($x) { $x.Count -gt 5 -and $x[5] -and !(Test-Path -LiteralPath $x[0]) }
 # Un junction/symlink, o algo que creó un usuario normal (ProgramData lo deja), no sirve para respaldos que se aplican
@@ -465,7 +474,7 @@ const TWEAKS = [
   // shortcut: solo busca los juegos en las rutas de instalación habituales, ampliar si hace falta
   { id: 'lap-dgpu', cat: 'games', name: 'Usar la GPU dedicada en los juegos', rec: s => s.laptop,
     desc: 'En notebooks y PCs con dos GPU, Windows a veces corre el juego en la integrada. Esto fuerza la GPU de alto rendimiento para Valorant, CS2, Fortnite y AION 2 si están instalados.',
-    L: String.raw`@(foreach($d in @(Get-PSDrive -PSProvider FileSystem | ForEach-Object Root)){ foreach($r in @('Riot Games\VALORANT\live\ShooterGame\Binaries\Win64\VALORANT-Win64-Shipping.exe','Epic Games\Fortnite\FortniteGame\Binaries\Win64\FortniteClient-Win64-Shipping.exe','Program Files\Epic Games\Fortnite\FortniteGame\Binaries\Win64\FortniteClient-Win64-Shipping.exe','SteamLibrary\steamapps\common\Counter-Strike Global Offensive\game\bin\win64\cs2.exe','Steam\steamapps\common\Counter-Strike Global Offensive\game\bin\win64\cs2.exe','Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive\game\bin\win64\cs2.exe','SteamLibrary\steamapps\common\AION2\Aion2\Binaries\Win64\AION2.exe','Steam\steamapps\common\AION2\Aion2\Binaries\Win64\AION2.exe','Program Files (x86)\Steam\steamapps\common\AION2\Aion2\Binaries\Win64\AION2.exe')){ $f=$d+$r; if(Test-Path -LiteralPath $f){ ,@('HKCU:\Software\Microsoft\DirectX\UserGpuPreferences',$f,'GpuPreference=2;','String',$null) } } })`,
+    L: String.raw`@(foreach($d in @([IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq 'Fixed' -and $_.IsReady } | ForEach-Object { $_.RootDirectory.FullName })){ foreach($r in @('Riot Games\VALORANT\live\ShooterGame\Binaries\Win64\VALORANT-Win64-Shipping.exe','Epic Games\Fortnite\FortniteGame\Binaries\Win64\FortniteClient-Win64-Shipping.exe','Program Files\Epic Games\Fortnite\FortniteGame\Binaries\Win64\FortniteClient-Win64-Shipping.exe','SteamLibrary\steamapps\common\Counter-Strike Global Offensive\game\bin\win64\cs2.exe','Steam\steamapps\common\Counter-Strike Global Offensive\game\bin\win64\cs2.exe','Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive\game\bin\win64\cs2.exe','SteamLibrary\steamapps\common\AION2\Aion2\Binaries\Win64\AION2.exe','Steam\steamapps\common\AION2\Aion2\Binaries\Win64\AION2.exe','Program Files (x86)\Steam\steamapps\common\AION2\Aion2\Binaries\Win64\AION2.exe')){ $f=$d+$r; if(Test-Path -LiteralPath $f){ ,@('HKCU:\Software\Microsoft\DirectX\UserGpuPreferences',$f,'GpuPreference=2;','String',$null) } } })`,
     apply: `if(-not @($L).Count){ Log 'No encontré Valorant, CS2, Fortnite ni AION 2 en las rutas habituales' 'warn' }`,
     check: '@($L).Count -gt 0' },
 
@@ -592,8 +601,9 @@ const TWEAKS = [
   })),
   { id: 'onedrive', cat: 'debloat', name: 'Desinstalar OneDrive', risk: 'med', debloat: true,
     desc: 'Quita OneDrive y su sincronización de fondo. Tus archivos de la carpeta OneDrive no se borran. Revertir lo reinstala con winget.',
-    apply: String.raw`Get-Process OneDrive -ErrorAction SilentlyContinue | Stop-Process -Force; $u=@("$env:LOCALAPPDATA\Microsoft\OneDrive\OneDriveSetup.exe","$env:SystemRoot\System32\OneDriveSetup.exe","$env:SystemRoot\SysWOW64\OneDriveSetup.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1; if($u){ Start-Process $u '/uninstall' -Wait } else { winget uninstall --id Microsoft.OneDrive -e --silent | Out-Null }`,
-    revert: 'winget install --id Microsoft.OneDrive -e --silent --accept-source-agreements --accept-package-agreements | Out-Null',
+    // La copia del perfil está en una carpeta que el usuario puede escribir: elevada, solo si la firmó Microsoft.
+    apply: String.raw`Get-Process OneDrive -ErrorAction SilentlyContinue | Stop-Process -Force; $u=@("$env:SystemRoot\System32\OneDriveSetup.exe","$env:SystemRoot\SysWOW64\OneDriveSetup.exe","$env:LOCALAPPDATA\Microsoft\OneDrive\OneDriveSetup.exe") | Where-Object { (Test-Path -LiteralPath $_) -and (MsSigned $_) } | Select-Object -First 1; if($u){ Start-Process $u '/uninstall' -Wait } else { & (WingetExe) uninstall --id Microsoft.OneDrive -e --silent | Out-Null }`,
+    revert: '& (WingetExe) install --id Microsoft.OneDrive -e --silent --accept-source-agreements --accept-package-agreements | Out-Null',
     check: String.raw`-not (Test-Path "$env:LOCALAPPDATA\Microsoft\OneDrive\OneDrive.exe") -and -not (Test-Path "$env:ProgramFiles\Microsoft OneDrive\OneDrive.exe")` },
   { id: 'edgebg', cat: 'debloat', name: 'Edge sin arranque ni segundo plano', rec: () => true,
     desc: 'Edge deja de precargarse al iniciar Windows y de quedar abierto después de cerrarlo.',

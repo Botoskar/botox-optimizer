@@ -502,6 +502,9 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
                     let _ = tx.send(Msg::Boosted { id, ok, out, err });
                 });
             }
+            // Un escaneo a la vez: F5 repetido lanzaba escaneos y lotes de PowerShell encima de los que seguían vivos.
+            // Mientras hay uno en curso no se lanza otro (Cancelar lo corta y libera).
+            Action::Rescan if !self.ps_ready || (self.spec.is_none() && self.scan_err.is_none()) => self.toast("Ya hay un escaneo en curso", ACCENT, 2.5),
             Action::Rescan => self.load_all(),
             Action::Cancel => {
                 engine::cancel_all();
