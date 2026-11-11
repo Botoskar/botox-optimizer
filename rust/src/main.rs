@@ -25,12 +25,13 @@ use std::time::{Duration, Instant};
 use theme::*;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Page { Home, Scan, Tweaks, Debloat, Boost, Startup, Backup }
+pub enum Page { Home, Scan, Tweaks, Fix, Debloat, Boost, Startup, Backup }
 
-const NAV: [(Page, &str, &str); 7] = [
+const NAV: [(Page, &str, &str); 8] = [
     (Page::Home, ic::HOUSE, "Inicio"),
     (Page::Scan, ic::CPU, "Escáner"),
     (Page::Tweaks, ic::ROCKET_LAUNCH, "Optimizaciones"),
+    (Page::Fix, ic::WRENCH, "Solucionar"),
     (Page::Debloat, ic::TRASH, "Debloat"),
     (Page::Boost, ic::GAUGE, "Boost-Up"),
     (Page::Startup, ic::POWER, "Arranque"),
@@ -88,6 +89,9 @@ pub enum Action {
 
 pub struct Confirm { pub text: String, pub action: Action }
 
+/// Aviso de las confirmaciones de lote: el botón "Crear punto y continuar" hace las dos cosas en orden.
+const RP_HINT: &str = "Si algo sale mal, un punto de restauración te deja volver la PC a como está ahora.";
+
 /// Aviso abajo a la derecha. `undo`: botón "Deshacer" que vuelve atrás el cambio recién hecho.
 struct Toast { msg: String, color: Color32, at: Instant, secs: f32, undo: Option<Action> }
 
@@ -128,6 +132,8 @@ pub struct App {
     pub confirm: Option<Confirm>,
     /// Tweaks que el usuario destildó en la confirmación de un lote.
     confirm_skip: HashSet<String>,
+    /// Lote que espera a que Windows termine de crear el punto de restauración ("Crear punto y continuar").
+    after_restore: Option<Vec<String>>,
     queue: VecDeque<String>,
     bulk: Option<(usize, usize, bool, Vec<String>)>, // (total, ok, alguno pide reinicio, los que quedaron como se pidió)
     pub boost_sel: usize,
@@ -417,7 +423,7 @@ impl App {
         let saved = load_saved();
         let mut app = Self {
             cat: Arc::new(Catalog::load()),
-            page: match win::test_env("BX_PAGE").as_deref() { Some("scan") => Page::Scan, Some("tweaks") => Page::Tweaks, Some("debloat") => Page::Debloat, Some("boost") => Page::Boost, Some("backup") => Page::Backup, Some("startup") => Page::Startup, _ => Page::Home },
+            page: match win::test_env("BX_PAGE").as_deref() { Some("scan") => Page::Scan, Some("tweaks") => Page::Tweaks, Some("fix") => Page::Fix,Some("debloat") => Page::Debloat, Some("boost") => Page::Boost, Some("backup") => Page::Backup, Some("startup") => Page::Startup, _ => Page::Home },
             startup: Vec::new(),
             update: None,
             fake: sys::fake_kind(),
@@ -435,6 +441,7 @@ impl App {
             actions: vec![],
             confirm: None,
             confirm_skip: HashSet::new(),
+            after_restore: None,
             queue: VecDeque::new(),
             bulk: None,
             boost_sel: 0,
@@ -563,6 +570,7 @@ impl App {
         // En modo de prueba solo se puede mirar: ni tweaks, ni limpiezas, ni reinicios, ni actualizaciones, aunque la app tenga permisos de administrador.
         if self.fake.is_some() && !matches!(a, Action::Go(..) | Action::Rescan | Action::RescanStartup | Action::Verify) {
             self.toast("Modo prueba: con hardware simulado no se aplica nada en la PC.", ACCENT, 3.5);
+            self.after_restore = None; // "Crear punto y continuar" no llega a correr: el lote no queda esperando
             return;
         }
         match a {
@@ -616,7 +624,10 @@ impl App {
                 if ids.is_empty() || self.need_admin() {
                     return;
                 }
-                let text = format!("Se van a {verb} {} optimizaciones.\n\nConviene crear antes un punto de restauración (sección Backups).\n\n¿Continuar?", ids.len());
+                if self.after_restore.is_some() {
+                    return self.toast("Esperá a que termine de crearse el punto de restauración.", ACCENT, 4.0);
+                }
+                let text = format!("Se van a {verb} {} optimizaciones.\n\n{RP_HINT}\n\n¿Continuar?", ids.len());
                 self.confirm = Some(Confirm { text, action: Action::ManyNow(ids) });
             }
             Action::ManyNow(ids) => {
@@ -851,9 +862,21 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
             Msg::Restore(r) => self.restore = Some(r),
             Msg::RestoreCreated(r) => {
                 self.busy.remove("rp");
-                match r {
-                    Ok(()) => self.toast("Punto de restauración creado.", GREEN, 5.0),
-                    Err(e) => self.toast(format!("No se pudo crear: {e} (Windows permite uno cada 24 h y requiere la protección del sistema activa)."), RED, 9.0),
+                let why = "Windows permite uno cada 24 h y requiere la protección del sistema activa";
+                // "Crear punto y continuar": el lote corre recién ahora. Si el punto falló, se pregunta antes de seguir.
+                match (r, self.after_restore.take()) {
+                    (Ok(()), Some(ids)) => {
+                        self.toast("Punto de restauración creado. Aplicando…", GREEN, 5.0);
+                        self.actions.push(Action::ManyNow(ids));
+                    }
+                    (Err(e), Some(ids)) if self.confirm.is_none() => {
+                        let text = format!("No se pudo crear el punto de restauración\n\n{e} ({why}). Las optimizaciones de abajo todavía no se aplicaron.\n\n¿Continuar?");
+                        self.confirm = Some(Confirm { text, action: Action::ManyNow(ids) });
+                    }
+                    // Había otra confirmación abierta: no se pisa; el lote se descarta con aviso.
+                    (Err(e), Some(_)) => self.toast(format!("No se pudo crear el punto ({e}): no se aplicó nada."), RED, 9.0),
+                    (Ok(()), None) => self.toast("Punto de restauración creado.", GREEN, 5.0),
+                    (Err(e), None) => self.toast(format!("No se pudo crear: {e} ({why})."), RED, 9.0),
                 }
                 self.refresh_backups();
             }
@@ -1024,7 +1047,7 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
             if self.safe && *page != Page::Backup {
                 continue;
             }
-            if i == 6 && !self.safe {
+            if *page == Page::Backup && !self.safe {
                 let (r, _) = ui.allocate_exact_size(Vec2::new(full.width(), 10.0), Sense::hover());
                 ui.painter().hline(r.x_range().shrink(22.0), r.center().y, egui::Stroke::new(1.0_f32, LINE));
             }
@@ -1056,13 +1079,13 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
         p.text(Pos2::new(pill.center().x, full.bottom() - 18.0), Align2::CENTER_CENTER, format!("v{}", env!("CARGO_PKG_VERSION")), regular(11.5), DIM);
     }
 
-    /// Atajos de teclado: Ctrl+1…7 secciones, Ctrl+F buscar, Ctrl+J consola, F5 escanear, Esc limpia la búsqueda.
+    /// Atajos de teclado: Ctrl+1…8 secciones, Ctrl+F buscar, Ctrl+J consola, F5 escanear, Esc limpia la búsqueda.
     fn keys(&mut self, ctx: &egui::Context) {
         use egui::{Key, Modifiers};
         if self.confirm.is_some() {
             return;
         }
-        let nums = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7];
+        let nums = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8];
         for (i, k) in nums.into_iter().enumerate() {
             if ctx.input_mut(|inp| inp.consume_key(Modifiers::CTRL, k)) {
                 self.actions.push(Action::Go(NAV[i].0, None));
@@ -1256,6 +1279,7 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
         }
         // Confirmación.
         let mut answer = None;
+        let mut with_rp = false;
         let mut selected = usize::MAX; // en lote: cuántas quedaron tildadas
         if let Some(c) = &self.confirm {
             egui::Modal::new(egui::Id::new("confirm")).frame(panel()).show(ctx, |ui| {
@@ -1270,7 +1294,7 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
                     Action::ManyNow(ids) => head.replacen(&ids.len().to_string(), &ids.iter().filter(|id| !self.confirm_skip.contains(*id)).count().to_string(), 1),
                     _ => head.to_string(),
                 };
-                ui.add(egui::Label::new(RichText::new(head).font(semi(17.0))).wrap());
+                ui.add(egui::Label::new(RichText::new(&head).font(semi(17.0))).wrap());
                 if !body.is_empty() {
                     ui.add(egui::Label::new(RichText::new(body).size(14.0).color(Color32::from_rgb(200, 208, 226))).wrap());
                 }
@@ -1325,9 +1349,15 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
                     ui.label(RichText::new("¿Continuar?").size(14.0));
                 }
                 ui.add_space(8.0);
+                // Al aplicar en lote se ofrece crear antes el punto de restauración (no al revertir, ni si recién falló).
+                let offer_rp = many && !head.starts_with("Se van a revertir") && !head.starts_with("No se pudo");
                 ui.horizontal(|ui| {
-                    let label = if selected == usize::MAX { "Continuar".to_string() } else { format!("Continuar con {selected}") };
-                    if ui.add_enabled_ui(selected > 0, |ui| button(ui, &label, Btn::Primary)).inner.clicked() {
+                    if offer_rp && ui.add_enabled_ui(selected > 0, |ui| button(ui, "Crear punto y continuar", Btn::Primary)).inner.on_hover_text("Crea un punto de restauración y, cuando Windows termina, aplica las tildadas").clicked() {
+                        answer = Some(true);
+                        with_rp = true;
+                    }
+                    let label = if selected == usize::MAX { "Continuar".to_string() } else if offer_rp { "Solo continuar".to_string() } else { format!("Continuar con {selected}") };
+                    if ui.add_enabled_ui(selected > 0, |ui| button(ui, &label, if offer_rp { Btn::Ghost } else { Btn::Primary })).inner.clicked() {
                         answer = Some(true);
                     }
                     if button(ui, "Cancelar", Btn::Ghost).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -1342,8 +1372,16 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
             if let Action::ManyNow(ids) = &mut c.action {
                 ids.retain(|id| !skip.contains(id));
             }
-            if yes {
-                self.actions.push(c.action);
+            match c.action {
+                // Si ya hay un punto creándose, el lote espera a ese mismo.
+                Action::ManyNow(ids) if yes && with_rp => {
+                    self.after_restore = Some(ids);
+                    if !self.busy.contains("rp") {
+                        self.actions.push(Action::CreateRestore);
+                    }
+                }
+                a if yes => self.actions.push(a),
+                _ => {}
             }
         }
     }
@@ -1364,7 +1402,7 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
         if ready && self.frames == 0 && self.confirm.is_none() && win::test_env("BX_CONFIRM").is_some() {
             let ids = self.cat.tweaks.iter().filter(|t| t.risk == "low").map(|t| t.id.clone()).collect::<Vec<_>>();
             self.confirm_skip.extend(ids.iter().take(2).cloned()); // para ver casillas destildadas
-            self.confirm = Some(Confirm { text: format!("Se van a activar {} optimizaciones.\n\nConviene crear antes un punto de restauración (sección Backups).\n\n¿Continuar?", ids.len()), action: Action::ManyNow(ids) });
+            self.confirm = Some(Confirm { text: format!("Se van a activar {} optimizaciones.\n\n{RP_HINT}\n\n¿Continuar?", ids.len()), action: Action::ManyNow(ids) });
         }
         // BX_UNDO=1: muestra el aviso de un cambio con su botón "Deshacer" (no aplica nada).
         if ready && self.frames == 0 && self.toasts.is_empty() && win::test_env("BX_UNDO").is_some() {

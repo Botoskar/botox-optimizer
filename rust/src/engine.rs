@@ -593,6 +593,37 @@ mod tests {
 
     const KEY: &str = r"HKCU:\Software\BotoxOptimizerTest";
 
+    /// Cada chequeo de PowerShell del catálogo devuelve True, False o 'na': nunca un error, vacío, una lista ni texto.
+    /// En la app un chequeo roto se ve como "apagado" para siempre; acá falla con el id y lo que devolvió.
+    /// Solo lee. Algunos chequeos piden administrador: corre en la CI (que es admin) y localmente se saltea.
+    #[test]
+    fn todos_los_chequeos_devuelven_un_estado_valido() {
+        if !is_admin() {
+            assert!(std::env::var_os("GITHUB_ACTIONS").is_none(), "en la CI los tests corren como administrador: este no se puede saltear");
+            return;
+        }
+        let cat = Catalog::load();
+        let ps: Vec<&Tweak> = cat.tweaks.iter().filter(|t| !t.native).collect();
+        // Igual que check_all_ps (`& { check }`), pero guardando el error en vez de tragarlo.
+        let mut script = String::from("$r=[ordered]@{}\n");
+        for t in &ps {
+            script += &format!("try {{ $r['{0}'] = @{{ v = (& {{ {1} }}) }} }} catch {{ $r['{0}'] = @{{ e = $_.Exception.Message }} }}\n", t.id, t.ps.as_ref().unwrap().check);
+        }
+        script += "$r | ConvertTo-Json -Compress -Depth 4";
+        let o = run_ps_with(&cat.prelude, &script, &Log(None), Duration::from_secs(600), &[]);
+        assert!(o.ok, "{}", o.err);
+        let map: HashMap<String, Value> = serde_json::from_str(&o.out[o.out.find('{').expect("sin JSON")..]).unwrap();
+        let bad: Vec<String> = ps
+            .iter()
+            .filter_map(|t| {
+                let r = map.get(&t.id);
+                let ok = r.and_then(|r| r.get("v")).is_some_and(|v| v.is_boolean() || v.as_str() == Some("na"));
+                (!ok).then(|| format!("{}: {}", t.id, r.map_or("sin salida".into(), |r| r.to_string())))
+            })
+            .collect();
+        assert!(bad.is_empty(), "chequeos con salida inválida:\n{}", bad.join("\n"));
+    }
+
     fn entry(n: &str, v: Value, t: &str, def: Value) -> RegEntry { RegEntry { p: KEY.into(), n: n.into(), v, t: t.into(), def, svc: false } }
 
     /// Aplica y revierte un tweak de verdad sobre una clave de prueba propia, y deja todo como estaba.

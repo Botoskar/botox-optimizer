@@ -20,8 +20,43 @@ fn ago_secs(secs: u64) -> String {
     match m { 0 => "recién".into(), 1..=59 => format!("hace {m} min"), 60..=1439 => format!("hace {} h", m / 60), _ => format!("hace {} d", m / 1440) }
 }
 
+/// Página Solucionar (#3): tweaks del catálogo agrupados por el problema que se quiere arreglar. No agrega tweaks;
+/// `cat:x` toma una categoría entera. (ícono, problema, explicación, ids)
+const FIXES: &[(&str, &str, &str, &[&str])] = &[
+    (ic::WAVE_SAWTOOTH, "El juego se tironea", "Microcortes aunque los FPS promedio estén bien.", &["fso", "windowedopt", "memcompress", "sysmain", "svchost", "lastaccess", "8dot3"]),
+    (ic::GAUGE, "Tengo menos FPS de los que debería", "El procesador o la placa de video no rinden todo lo que pueden.", &["ultimate", "gamemode", "hags", "gamedvr", "vbs", "powerthrottle", "cpuboost", "cpumin", "dynamictick"]),
+    (ic::WIFI_HIGH, "Lag o ping alto en juegos online", "Retardo de red que agrega Windows por su cuenta.", &["nagle", "tcpparams", "qos", "netthrottle", "niclatency", "dns"]),
+    (ic::HARD_DRIVES, "La PC está lenta de fondo", "Indexación, telemetría y apps que usan disco y CPU sin que las abras.", &["wsearch", "sysmain", "diagtrack", "telemetrytasks", "bgapps"]),
+    (ic::TIMER, "Tarda en arrancar", "Además de esto, en Arranque podés apagar los programas que inician con Windows.", &["startupdelay"]),
+    (ic::SHIELD_CHECK, "Me preocupa mi privacidad", "Telemetría, publicidad personalizada e historial que Windows manda o guarda.", &["cat:privacy"]),
+    (ic::BELL_SLASH, "Avisos y publicidad que molestan", "Sugerencias, anuncios y Bing metidos en Windows.", &["ads", "lockads", "bing", "widgets", "tailored"]),
+];
+
+/// Los tweaks de un grupo de Solucionar, en el orden del grupo (los `cat:` en el orden del catálogo).
+fn fix_tweaks<'a>(cat: &'a crate::catalog::Catalog, ids: &[&str]) -> Vec<&'a Tweak> {
+    let mut v: Vec<&Tweak> = Vec::new();
+    for id in ids {
+        match id.strip_prefix("cat:") {
+            Some(c) => v.extend(cat.tweaks.iter().filter(|t| t.cat == c)),
+            None => v.extend(cat.tweak(id)),
+        }
+    }
+    v
+}
+
 #[cfg(test)]
 mod tests {
+    /// Un id mal escrito en Solucionar dejaría el grupo con menos ajustes sin que nadie lo note.
+    #[test]
+    fn solucionar_solo_usa_ids_del_catalogo() {
+        let cat = crate::catalog::Catalog::load();
+        for (_, name, _, ids) in super::FIXES {
+            for id in *ids {
+                assert!(!super::fix_tweaks(&cat, &[id]).is_empty(), "{name}: {id} no existe en el catálogo");
+            }
+        }
+    }
+
     #[test]
     fn hace_cuanto_en_palabras() {
         use super::ago_secs;
@@ -190,6 +225,7 @@ impl App {
             Page::Home => self.home(ui),
             Page::Scan => self.scan_page(ui),
             Page::Tweaks => self.tweak_page(ui, "Optimizaciones", "ajustes de FPS, latencia, red, registro y privacidad. Todos se pueden revertir.", &[]),
+            Page::Fix => self.fix_page(ui),
             Page::Debloat => self.tweak_page(ui, "Debloat", "Quitá apps preinstaladas y servicios que corren de fondo sin que los uses.", &["debloat", "svc"]),
             Page::Boost => self.boost_page(ui),
             Page::Startup => self.startup_page(ui),
@@ -530,6 +566,63 @@ impl App {
             ui.horizontal(|ui| {
                 for t in chunk {
                     self.card(ui, t, w);
+                }
+            });
+        }
+    }
+
+    // ── Solucionar ──
+
+    /// Grupos por problema: se abren para ver los ajustes y aplicar los que faltan (riesgo medio, destildados).
+    fn fix_page(&mut self, ui: &mut Ui) {
+        let (cat, f) = (self.cat.clone(), self.facts.clone());
+        header(ui, "Solucionar un problema", "Elegí lo que te pasa y te mostramos los ajustes que lo atacan. Son los mismos de Optimizaciones: todos se pueden revertir.", |_| {});
+        self.state_age(ui);
+        ui.add_space(4.0);
+        ui.spacing_mut().item_spacing.y = 10.0;
+        for (i, (icon, name, desc, ids)) in FIXES.iter().enumerate() {
+            // Solo los que corresponden a esta PC (fuera los "no aplica"). Ningún grupo usa tweaks de notebook.
+            let list: Vec<&Tweak> = fix_tweaks(&cat, ids).into_iter().filter(|t| t.applies(&f)).collect();
+            let done = list.iter().filter(|t| self.on(&t.id)).count();
+            let todo: Vec<String> = list.iter().filter(|t| self.state.get(&t.id) == Some(&false)).map(|t| t.id.clone()).collect();
+            egui::Frame::new().fill(CARD).stroke(Stroke::new(1.0_f32, LINE)).corner_radius(12).inner_margin(egui::Margin::symmetric(18, 12)).show(ui, |ui| {
+                let id = ui.make_persistent_id(("fix", i));
+                let mut flip = false; // clic en el ícono o el título: abre o cierra, igual que la flecha
+                egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
+                    .show_header(ui, |ui| {
+                        let hand = |r: egui::Response| r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
+                        flip |= hand(ui.add(Label::new(RichText::new(*icon).size(26.0).color(ACCENT)).sense(Sense::click())));
+                        ui.add_space(6.0);
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            flip |= hand(ui.add(Label::new(RichText::new(*name).font(semi(15.0))).sense(Sense::click())));
+                            ui.add(Label::new(RichText::new(*desc).size(12.5).color(MUTED)).wrap());
+                        });
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if !todo.is_empty() && button(ui, &format!("Aplicar {}", todo.len()), Btn::Primary).clicked() {
+                                // Las de riesgo medio, destildadas (solo si la confirmación va a aparecer: sin admin, Many solo avisa).
+                                if self.admin && self.confirm.is_none() && self.after_restore.is_none() {
+                                    self.confirm_skip = todo.iter().filter(|id| cat.tweak(id).is_some_and(|t| t.risk != "low")).cloned().collect();
+                                }
+                                self.actions.push(Action::Many(todo.clone(), "aplicar"));
+                            }
+                            let (txt, col) = if list.is_empty() { ("No aplica a esta PC".to_string(), DIM) } else { (format!("{done} de {} activos", list.len()), if done == list.len() { GREEN } else { MUTED }) };
+                            ui.label(RichText::new(txt).size(12.5).color(col));
+                        });
+                    })
+                    .body(|ui| {
+                        ui.spacing_mut().item_spacing.y = 8.0;
+                        for t in &list {
+                            self.row(ui, t, false);
+                        }
+                        if *name == "Tarda en arrancar" && button(ui, "Ir a Arranque", Btn::Ghost).clicked() {
+                            self.actions.push(Action::Go(Page::Startup, None));
+                        }
+                    });
+                if flip {
+                    let mut s = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+                    s.toggle(ui);
+                    s.store(ui.ctx());
                 }
             });
         }

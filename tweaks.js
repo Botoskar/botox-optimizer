@@ -215,7 +215,15 @@ function NicApply($id, $kv) {
   NicRestart @($cur.a | Select-Object -Unique); WaitNics $n
 }
 function NicRevert($id, $kv) {
-  $b = Read-Bk "$id-nic"; if ($null -eq $b -or !@($b).Count) { Remove-Bk "$id-nic"; return }; $n = @(Nics).Count
+  $b = Read-Bk "$id-nic"; $n = @(Nics).Count
+  # Sin respaldo (aplicado con otra versión o a mano): lo que está como el tweak vuelve al valor por defecto del driver.
+  if ($null -eq $b -or !@($b).Count) {
+    Remove-Bk "$id-nic"; $cur = @(NicProps $kv | Where-Object { $_.v -eq [string]$kv[$_.k] }); if (!$cur.Count) { return }
+    Log 'No hay respaldo de la placa de red: se vuelve a los valores por defecto del driver' 'warn'
+    foreach ($c in $cur) { $d = [string](Get-NetAdapterAdvancedProperty -Name $c.a -RegistryKeyword $c.k).DefaultRegistryValue
+      if ($d) { Set-NetAdapterAdvancedProperty -Name $c.a -RegistryKeyword $c.k -RegistryValue $d -NoRestart; Log "Placa $($c.a) · $($c.k): $($c.v) → $d (por defecto)" } }
+    NicRestart @($cur.a | Select-Object -Unique); WaitNics $n; return
+  }
   $fail = 0
   foreach ($c in $b) { if (!$kv.ContainsKey($c.k)) { Log "El respaldo trae una propiedad de red ajena ($($c.k)): se saltea" 'warn'; continue }
     try { Set-NetAdapterAdvancedProperty -Name $c.a -RegistryKeyword $c.k -RegistryValue $c.v -NoRestart -ErrorAction Stop; Log "Placa $($c.a) · $($c.k): → $($c.v)" }
