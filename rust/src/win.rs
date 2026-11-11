@@ -327,8 +327,12 @@ struct ProviderCert {
     cert: *const c_void,
 }
 
-/// Verifica la firma Authenticode (cadena de confianza incluida) y devuelve el thumbprint SHA-1 del certificado
-/// firmante, en hexadecimal mayúscula, para compararlo con los fijados en `update.rs`.
+/// CERT_E_UNTRUSTEDROOT: la firma y el archivo están bien, pero la raíz no es una CA instalada (certificado autofirmado).
+const CERT_E_UNTRUSTEDROOT: i32 = 0x800B_0109_u32 as i32;
+
+/// Verifica la firma Authenticode y devuelve el thumbprint SHA-1 del certificado firmante, en hexadecimal mayúscula.
+/// Acepta una raíz no confiable (certificado autofirmado): **el resultado solo vale comparado con un thumbprint fijado**
+/// (`update.rs` lo exige siempre). Un archivo adulterado o sin firma falla antes, con otro código (p. ej. TRUST_E_BAD_DIGEST).
 pub fn authenticode_signer(path: &Path) -> Result<String, String> {
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
     let mut fi = FileInfo { cb_struct: std::mem::size_of::<FileInfo>() as u32, file_path: wide.as_ptr(), file_handle: 0, known_subject: std::ptr::null() };
@@ -348,7 +352,8 @@ pub fn authenticode_signer(path: &Path) -> Result<String, String> {
         signature_settings: std::ptr::null_mut(),
     };
     let hr = unsafe { WinVerifyTrust(0, &ACTION_GENERIC_VERIFY_V2, &mut td as *mut TrustData as *mut c_void) };
-    let thumb = (hr == 0).then(|| unsafe {
+    let signed_ok = hr == 0 || hr == CERT_E_UNTRUSTEDROOT;
+    let thumb = signed_ok.then(|| unsafe {
         let prov = WTHelperProvDataFromStateData(td.state_data);
         let signer = if prov.is_null() { std::ptr::null_mut() } else { WTHelperGetProvSignerFromChain(prov, 0, 0, 0) };
         let cert = if signer.is_null() { std::ptr::null_mut() } else { WTHelperGetProvCertFromChain(signer, 0) };
@@ -361,10 +366,10 @@ pub fn authenticode_signer(path: &Path) -> Result<String, String> {
     });
     td.state_action = 2; // WTD_STATEACTION_CLOSE
     unsafe { WinVerifyTrust(0, &ACTION_GENERIC_VERIFY_V2, &mut td as *mut TrustData as *mut c_void) };
-    match (hr, thumb.flatten()) {
-        (0, Some(t)) => Ok(t),
-        (0, None) => Err("firma válida pero no se pudo leer el certificado firmante".into()),
-        _ => Err(format!("firma Authenticode ausente o no confiable (0x{:08X})", hr as u32)),
+    match (signed_ok, thumb.flatten()) {
+        (true, Some(t)) => Ok(t),
+        (true, None) => Err("firma válida pero no se pudo leer el certificado firmante".into()),
+        _ => Err(format!("firma Authenticode ausente o inválida (0x{:08X})", hr as u32)),
     }
 }
 
@@ -479,5 +484,34 @@ mod tests {
         let t = authenticode_signer(exe).unwrap_or_else(|e| panic!("{}: {e}", exe.display()));
         assert_eq!(t.len(), 40, "{t}");
         assert!(t.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_lowercase()), "{t}");
+    }
+
+    #[test]
+    fn autofirmado_da_su_thumbprint_y_un_byte_cambiado_lo_invalida() {
+        // Certificado autofirmado de prueba en CurrentUser\My: se crea, firma una copia de este .exe y se borra con su
+        // clave en el mismo script (finally). No toca el almacén de raíces de confianza.
+        let dir = std::env::temp_dir().join(format!("bx-sign-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("firmado.exe");
+        std::fs::copy(std::env::current_exe().unwrap(), &exe).unwrap();
+        let script = format!(
+            "$ErrorActionPreference='Stop'; $c = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=BotoxTestFirma' -CertStoreLocation Cert:\\CurrentUser\\My -NotAfter (Get-Date).AddDays(1); \
+             try {{ $s = Set-AuthenticodeSignature -LiteralPath '{}' -Certificate $c -HashAlgorithm SHA256; if (-not $s.SignerCertificate) {{ throw $s.StatusMessage }}; $c.Thumbprint }} \
+             finally {{ Remove-Item -LiteralPath ('Cert:\\CurrentUser\\My\\' + $c.Thumbprint) -DeleteKey }}",
+            exe.display()
+        );
+        let out = std::process::Command::new(system32().join(r"WindowsPowerShell\v1.0\powershell.exe")).args(["-NoProfile", "-NonInteractive", "-Command", &script]).output().unwrap();
+        let thumb = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert!(out.status.success() && thumb.len() == 40, "no se pudo firmar: {thumb} {}", String::from_utf8_lossy(&out.stderr));
+        // Raíz no confiable, pero la firma es íntegra: devuelve el firmante para compararlo con el pin.
+        assert_eq!(authenticode_signer(&exe), Ok(thumb));
+        // Un byte del código cambiado: el digest no coincide y se rechaza, aunque el certificado sea el mismo.
+        let mut bytes = std::fs::read(&exe).unwrap();
+        let mid = bytes.len() / 2;
+        bytes[mid] ^= 0xFF;
+        let bad = dir.join("adulterado.exe");
+        std::fs::write(&bad, bytes).unwrap();
+        assert!(authenticode_signer(&bad).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

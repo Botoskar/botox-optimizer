@@ -16,10 +16,11 @@ const ASSET: &str = "BotoxOptimizer.exe";
 const REQUIRE_SIGNATURE: bool = !cfg!(debug_assertions);
 /// Publisher pinning: thumbprints SHA-1 de los certificados con los que se firman las versiones. Una firma válida
 /// de cualquier otro certificado se rechaza. Es una lista para poder renovar el certificado: la versión firmada con
-/// el viejo trae ya el nuevo. VACÍA = en release no se instala ninguna actualización (todavía no hay certificado).
-/// Cómo sacarlo: `(Get-AuthenticodeSignature .\BotoxOptimizer.exe).SignerCertificate.Thumbprint` (ver README).
+/// el viejo trae ya el nuevo. Vacía = en release no se instala ninguna actualización.
+/// El certificado es autofirmado ("CN=Botox Optimizer", vence 2046-11-11, lo crea tools/new-signing-cert.ps1): Windows no
+/// confía en su raíz, así que lo único que lo autentica es este thumbprint. Ver README > Sacar una versión nueva.
 /// No hay variable de entorno para saltearlo: sería un bypass.
-const PUBLISHER_THUMBPRINTS: &[&str] = &[];
+const PUBLISHER_THUMBPRINTS: &[&str] = &["2DBA1019FCB52F90A5692BA2F4FACF02976DABD7"];
 
 /// true si el thumbprint (con o sin espacios, en cualquier caso) está en la lista fijada.
 fn pin_matches(thumb: &str, pins: &[&str]) -> bool {

@@ -6,7 +6,7 @@ El repo no tiene `LICENSE`. No se eligió una por vos: es una decisión tuya. Ha
 
 | Opción | Qué permite | Cuándo conviene |
 |---|---|---|
-| **Sin licencia + repo privado** (recomendada si no querés que otros usen el código) | Nada a terceros. Tus amigos solo reciben el `.exe`. | Si el objetivo es solo pasar el programa, no el código. |
+| **Sin licencia** (como está hoy, con el repo público) | Ver el código, nada más: no se puede copiar ni reutilizar. | Si querés mostrar el código sin dar permisos. |
 | **Licencia propietaria corta** ("se permite usar el .exe gratis; prohibido redistribuirlo modificado ni venderlo") | Uso del binario, nada del código. | Si vas a distribuir el `.exe` a más gente y querés reglas claras. |
 | **MIT** | Cualquiera usa, copia y modifica, incluso para vender, manteniendo tu aviso de copyright. | Si querés que sea open source sin vueltas. |
 | **GPL-3.0** | Igual que MIT, pero quien distribuya una versión modificada tiene que publicar su código con la misma licencia. | Open source, pero que nadie lo cierre. |

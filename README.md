@@ -7,7 +7,7 @@ Optimizador de FPS y latencia para PC gamer con Windows 10/11. App nativa en Rus
 - `rust/`: la app. El código está en `rust/src`.
 - `tweaks.js` y `scan.js`: el catálogo de tweaks y el script del escáner. La app no los lee directo: `node rust/tools/export-catalog.js` los convierte en `rust/assets/catalog.json`.
 - Las versiones listas para usar se publican en un repo público aparte, solo con el `.exe`: https://github.com/Botoskar/botox-optimizer-releases
-- **Visibilidad:** según la API de GitHub (11/11/2026), este repositorio de código (`Botoskar/botox-optimizer`) es **público**. Ninguna versión del README debería decir que es privado mientras no lo sea. No tiene claves ni secretos. Si no querés que otros vean o reutilicen el código, recomendación: pasarlo a privado (Settings > General > Danger Zone). El actualizador no lo necesita, porque solo lee el repo de versiones. Sin `LICENSE`, nadie puede reutilizarlo legalmente igual; ver `LICENSE-PROPUESTA.md`.
+- **Visibilidad:** este repositorio de código (`Botoskar/botox-optimizer`) es **público a propósito**. No tiene claves ni secretos, y no tiene que tenerlos: la clave privada de firma nunca se sube (ver "Sacar una versión nueva"). Sin `LICENSE`, que el código se vea no da permiso para reutilizarlo; ver `LICENSE-PROPUESTA.md`.
 - `THIRD-PARTY-NOTICES.md`: licencias de lo que va dentro del `.exe` (Poppins bajo SIL OFL 1.1 y las dependencias). `SECURITY.md`: cómo reportar vulnerabilidades. `docs/DISENO-MOTOR-ELEVADO.md`: propuesta para separar la interfaz del motor elevado.
 
 ## Compilar
@@ -17,7 +17,7 @@ El toolchain (Rust + mingw64) está en `M:\Github Things\botox-optimizer-rust` y
 ```bash
 cd rust
 cmd //c ".\\cargo.cmd build"                         # desarrollo, sin admin (modo solo lectura)
-cmd //c ".\\cargo.cmd test"                          # 48 tests (nunca los corras elevado)
+cmd //c ".\\cargo.cmd test"                          # 49 tests (nunca los corras elevado)
 BX_ADMIN=1 cmd //c ".\\cargo.cmd build --release"    # versión para usar: pide administrador
 powershell -NoProfile -File tools\parse-ps.ps1       # sintaxis de los 113 scripts del catálogo, sin ejecutarlos
 ```
@@ -32,21 +32,29 @@ Si la app está abierta, el `.exe` queda bloqueado: por eso se usa una copia en 
 
 La app busca sola, al abrir, la última versión en `botox-optimizer-releases` y ofrece un botón "Actualizar". No lleva ninguna clave: el repo de versiones es público y solo trae el `.exe`; el código fuente está en este repositorio.
 
-> **Importante antes de publicar la próxima versión.** Desde esta rama, el `.exe` de release solo instala actualizaciones firmadas con Authenticode **por un certificado fijado** en `PUBLISHER_THUMBPRINTS` (`rust/src/update.rs`). Esa lista está **vacía**: una versión publicada así puede recibir el `.exe` a mano, pero **nunca va a poder actualizarse sola**. Antes de publicarla:
-> 1. Conseguí un certificado de firma de código.
-> 2. Agregá su thumbprint a la lista.
-> 3. Firmá con él esa misma versión y todas las siguientes.
+### Certificado de firma (autofirmado, gratis)
+
+El `.exe` de release solo instala actualizaciones firmadas con Authenticode **por el certificado fijado** en `PUBLISHER_THUMBPRINTS` (`rust/src/update.rs`).
+- El certificado es autofirmado: `CN=Botox Optimizer`, thumbprint `2DBA1019FCB52F90A5692BA2F4FACF02976DABD7`, vence el 2046-11-11.
+- Lo creó `rust/tools/new-signing-cert.ps1` en `Cert:\CurrentUser\My` de la PC del dueño. **La clave privada no está en el repo y nunca se sube.**
+- Windows no confía en su raíz, así que el estado aparece como `UnknownError`. Eso es esperado: la app acepta una raíz no confiable **solo** si el firmante es el thumbprint fijado. Un archivo adulterado falla igual, con otro error.
+- Lo que no cambia: Windows sigue mostrando "Editor desconocido" en el aviso de UAC y SmartScreen puede advertir. El certificado protege las actualizaciones, no la primera descarga.
+
+**Hacé una copia de la clave fuera de esta PC.** Si se pierde (formateo, disco roto), ninguna versión publicada va a poder actualizarse sola, y habrá que pasar el `.exe` a mano. Para exportarla, con una contraseña que elegís vos:
+```powershell
+$c = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert | Where-Object Subject -eq 'CN=Botox Optimizer'
+Export-PfxCertificate -Cert $c -FilePath D:\backup\botox-firma.pfx -Password (Read-Host -AsSecureString 'Contraseña')
+```
+Guardá el `.pfx` en un pendrive o en una nube personal, nunca en este repo. Para restaurarla en otra PC: `Import-PfxCertificate -FilePath botox-firma.pfx -CertStoreLocation Cert:\CurrentUser\My -Exportable -Password (Read-Host -AsSecureString)`.
+
+Para cambiar de certificado: agregá el nuevo thumbprint a la lista en una versión firmada con el viejo, y recién en la siguiente firmá con el nuevo. Cada versión verifica a la que viene después.
+
+### Pasos
 
 1. Subí la versión en `rust/Cargo.toml` y compilá la versión con admin (arriba). Usá siempre tres números, `X.Y.Z`: una versión de cuatro (`1.2.3.4`) no se reconoce y la actualización no se ofrece.
 2. Copiá el `.exe` como **`BotoxOptimizer.exe`** (sin espacios: la app busca ese nombre).
-3. Firmalo con Authenticode, con timestamp: `signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f cert.pfx BotoxOptimizer.exe`. Comprobá que diga `Valid` y sacá el thumbprint:
-   ```powershell
-   $s = Get-AuthenticodeSignature .\BotoxOptimizer.exe; $s.Status; $s.SignerCertificate.Thumbprint
-   ```
-   Ese thumbprint (40 caracteres hexadecimales) va en `PUBLISHER_THUMBPRINTS`. Se compila **en la versión anterior** a la que lo usa: cada versión verifica a la siguiente. Al renovar el certificado, agregá el nuevo a la lista en una versión firmada con el viejo y recién después firmá con el nuevo.
-   El certificado tiene que ser de una CA en la que confíe Windows: `WinVerifyTrust` exige la cadena completa. Uno autofirmado solo sirve si instalás su raíz en cada PC.
-4. Sacá el hash **después de firmar** (la firma cambia el archivo): `Get-FileHash BotoxOptimizer.exe`.
-5. En `botox-optimizer-releases` > Releases > Draft a new release:
+3. Firmalo: `powershell -NoProfile -File rust\tools\sign.ps1 <ruta>\BotoxOptimizer.exe`. Firma con timestamp, comprueba que el firmante sea el certificado fijado y muestra el `SHA256` (sacado después de firmar, porque la firma cambia el archivo).
+4. En `botox-optimizer-releases` > Releases > Draft a new release:
    - Tag `vX.Y.Z` (igual a la versión de `Cargo.toml`).
    - En la descripción, una línea `SHA256: <hash>`. La app no instala si el hash no coincide (también se compara con el digest del asset que publica GitHub).
    - Adjuntá `BotoxOptimizer.exe` y publicá (no como pre-release: la app mira solo la última publicada).
@@ -73,7 +81,7 @@ Esto protege solo las actualizaciones hechas **desde** una versión que ya trae 
   - Si no lo son, no se usan y la acción falla sin tocar nada.
   - Pasa en Rust (`win::require_admin_owned`) y en PowerShell (`BkGuard`).
 - `BX_SHOT`, `BX_PAGE`, `BX_TAB`, `BX_DEMO`, `BX_CONFIRM`, `BX_REBOOT`, `BX_LAPTOP`, `BX_UPDATE_API` y `BX_BACKUP_DIR` solo se leen en builds de desarrollo. El `.exe` de release los ignora. Excepción: `BX_FAKE` también se lee en release, porque los lanzadores de prueba usan ese `.exe`. Solo quita poder: con `BX_FAKE` la app bloquea toda acción. Ningún `BX_*` llega a los hijos elevados.
-- La actualización verifica el SHA256 en el mismo proceso que instala. En release exige firma Authenticode válida **y** un certificado fijado (ver "Sacar una versión nueva"). No hay variable de entorno para saltearlo.
+- La actualización verifica el SHA256 en el mismo proceso que instala. En release exige una firma Authenticode íntegra hecha por el certificado fijado (autofirmado; ver "Sacar una versión nueva"). Una raíz no confiable se acepta solo si el firmante es ese certificado. No hay variable de entorno para saltearlo.
 - Una sola instancia (mutex `Local\BotoxOptimizer.Instancia`): otra ventana trae la existente al frente. Las copias con `BX_FAKE` pueden abrirse al lado de la real.
 - Si la app se cierra por un error interno, deja `%LOCALAPPDATA%\BotoxOptimizer\crash.log`: fecha, versión, mensaje y backtrace, sin datos personales. Pasado 1 MB empieza de nuevo. `state.json` se guarda de forma atómica (temporal + rename).
 - **UAC con otra cuenta** (el aviso lo aprueba un administrador distinto del usuario que abrió la app): la app elevada corre con el perfil de **ese administrador**. Las limpiezas de temporales, crash dumps y recientes, el avatar, `state.json` y `crash.log` usan su perfil, no el del usuario. No se intenta adivinar el perfil del otro usuario, porque no hay una forma confiable sin el refactor de `docs/DISENO-MOTOR-ELEVADO.md`. En la PC típica (usuario administrador) no pasa.
