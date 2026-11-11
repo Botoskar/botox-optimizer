@@ -120,7 +120,7 @@ pub fn program_files_x86() -> PathBuf {
     known_folder(&PROGRAM_FILES_X86).unwrap_or_else(program_files)
 }
 
-fn system_drive() -> String {
+pub fn system_drive() -> String {
     match windows_dir().components().next() {
         Some(Component::Prefix(p)) => p.as_os_str().to_string_lossy().into_owned(),
         _ => "C:".into(),

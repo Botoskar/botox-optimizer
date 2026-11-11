@@ -707,9 +707,10 @@ foreach ($x in $v) { $d = "$($x.DriveLetter):"; $t0 = Get-Date
   { id: 'dism', name: 'Limpiar componentes de Windows', icon: '🧩', every: 'Cada 2-3 meses',
     desc: 'DISM StartComponentCleanup: borra versiones viejas de componentes en WinSxS. Puede tardar 5-15 minutos.',
     ps: String.raw`Log 'DISM StartComponentCleanup en curso: suele tardar 5-15 minutos. El contador de la consola muestra que sigue trabajando.'
-$a = (Get-PSDrive C).Free; & ([Environment]::SystemDirectory + '\Dism.exe') /Online /Cleanup-Image /StartComponentCleanup /Quiet | Out-Null; $c = $LASTEXITCODE
+$sd = [IO.Path]::GetPathRoot([Environment]::SystemDirectory).Substring(0, 1)  # unidad de Windows (no siempre C:)
+$a = (Get-PSDrive $sd).Free; & ([Environment]::SystemDirectory + '\Dism.exe') /Online /Cleanup-Image /StartComponentCleanup /Quiet | Out-Null; $c = $LASTEXITCODE
 Log "DISM terminó (código $c)" $(if ($c) { 'warn' } else { 'ok' })
-'Liberados {0:N0} MB en C:' -f (((Get-PSDrive C).Free - $a) / 1MB)` },
+'Liberados {0:N0} MB en {1}:' -f (((Get-PSDrive $sd).Free - $a) / 1MB), $sd` },
 ];
 
 module.exports = { TWEAKS, CATS, BOOSTS, PRELUDE, applyPS, revertPS, checkPS, checkAllPS };

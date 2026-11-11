@@ -239,13 +239,28 @@ fn avatar_texture(ctx: &egui::Context, img: &image::RgbaImage) -> egui::TextureH
 
 /// Abre una imagen mirando su contenido, no la extensión: muchas ".jpg" bajadas de internet son WebP o PNG.
 fn open_image(path: impl AsRef<std::path::Path>) -> Result<image::DynamicImage, String> {
-    image::ImageReader::open(path).and_then(|r| r.with_guessed_format()).map_err(|e| e.to_string())?.decode().map_err(|e| e.to_string())
+    // Límites antes de decodificar: una imagen gigante (o un archivo armado para eso) no se lleva toda la memoria.
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 50 << 20) {
+        return Err("la imagen pesa más de 50 MB".into());
+    }
+    let mut r = image::ImageReader::open(path).and_then(|r| r.with_guessed_format()).map_err(|e| e.to_string())?;
+    let mut lim = image::Limits::default();
+    lim.max_image_width = Some(MAX_SIDE);
+    lim.max_image_height = Some(MAX_SIDE);
+    r.limits(lim);
+    r.decode().map_err(|e| e.to_string())
 }
+
+/// Lado máximo de una imagen para el logo (luego se achica a 512 px igual).
+const MAX_SIDE: u32 = 12_000;
 
 /// Imagen copiada en el portapapeles, o un archivo de imagen copiado en el Explorador.
 fn clipboard_image() -> Result<image::DynamicImage, String> {
     let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
     if let Ok(i) = cb.get_image() {
+        if i.width > MAX_SIDE as usize || i.height > MAX_SIDE as usize {
+            return Err("la imagen copiada es demasiado grande".into());
+        }
         return image::RgbaImage::from_raw(i.width as u32, i.height as u32, i.bytes.into_owned()).map(image::DynamicImage::ImageRgba8).ok_or_else(|| "imagen dañada".into());
     }
     let file = cb.get().file_list().ok().and_then(|l| l.into_iter().next()).ok_or("no hay nada copiado que sea una imagen.")?;

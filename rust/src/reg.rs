@@ -213,6 +213,16 @@ mod tests {
     }
 
     #[test]
+    fn multistring_lleva_un_solo_nul_extra_al_final() {
+        // Formato de REG_MULTI_SZ: cada cadena con su NUL y uno más al final ("a\0b\0\0"), ni más ni menos.
+        const KEY: &str = r"HKCU:\Software\BotoxRegMultiTest";
+        set(KEY, "M", &json!(["a", "b"]), "MultiString").unwrap();
+        let raw = RegKey::predef(HKEY_CURRENT_USER).open_subkey(r"Software\BotoxRegMultiTest").unwrap().get_raw_value("M").unwrap();
+        let _ = RegKey::predef(HKEY_CURRENT_USER).delete_subkey_all(r"Software\BotoxRegMultiTest");
+        assert_eq!(raw.bytes, "a\0b\0\0".encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>());
+    }
+
+    #[test]
     fn lee_un_valor_real() {
         // Existe en todo Windows y es de solo lectura para la prueba.
         let (v, t) = get("HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", "CurrentBuild").expect("CurrentBuild");

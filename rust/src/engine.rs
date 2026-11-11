@@ -282,6 +282,10 @@ pub fn check_native(t: &Tweak) -> bool {
 
 pub struct PsOut { pub ok: bool, pub out: String, pub err: String }
 
+/// Marca del error que atrapa el envoltorio. Improbable a propósito: antes era "ERR:" y cualquier salida con ese texto
+/// se tomaba como falla del script.
+const ERR_TAG: &str = "__BOTOX_ERR__:";
+
 /// Corre un script con el preludio del catálogo. Las líneas `LOG:nivel|mensaje` y la salida van en vivo a la consola.
 pub fn run_ps(prelude: &str, script: &str, log: &Log) -> PsOut {
     run_ps_with(prelude, script, log, Duration::from_secs(300), &[])
@@ -297,8 +301,10 @@ pub fn run_ps_with(prelude: &str, script: &str, log: &Log, timeout: Duration, en
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
     let file = dir.join(format!("botox-{}-{nanos:x}.ps1", std::process::id()));
     // BOM: PowerShell 5.1 lee el archivo como UTF-8 solo si lo trae.
-    let body = format!("\u{feff}{prelude}\ntry {{\n{script}\n}} catch {{ Write-Output ('ERR:' + $_.Exception.Message); exit 1 }}");
-    if let Err(e) = std::fs::write(&file, body) {
+    let body = format!("\u{feff}{prelude}\ntry {{\n{script}\n}} catch {{ Write-Output ('{ERR_TAG}' + $_.Exception.Message); exit 1 }}");
+    // create_new: nunca se escribe encima de un archivo que ya estaba (y que podría haber plantado otro).
+    let write = std::fs::OpenOptions::new().write(true).create_new(true).open(&file).and_then(|mut f| std::io::Write::write_all(&mut f, body.as_bytes()));
+    if let Err(e) = write {
         return fail(e.to_string());
     }
     let mut cmd = win::secure_command(win::powershell());
@@ -359,7 +365,7 @@ pub fn run_ps_with(prelude: &str, script: &str, log: &Log, timeout: Duration, en
         if line.trim().is_empty() {
             continue;
         }
-        if !line.starts_with("ERR:") {
+        if !line.starts_with(ERR_TAG) {
             log.put("out", line.trim());
         }
         out.push_str(line);
@@ -378,7 +384,7 @@ pub fn run_ps_with(prelude: &str, script: &str, log: &Log, timeout: Duration, en
         log.put("warn", format!("El script superó {} s: se canceló", timeout.as_secs()));
     }
     let out = out.trim().to_string();
-    let caught = out.split_once("ERR:").map(|x| x.1.trim().to_string());
+    let caught = out.split_once(ERR_TAG).map(|x| x.1.trim().to_string());
     let mut err = caught.clone().unwrap_or_else(|| if code != 0 { if stderr.trim().is_empty() { format!("PowerShell terminó con código {code}") } else { stderr.trim().to_string() } } else { String::new() });
     if timed_out {
         err = format!("PowerShell superó el tiempo máximo ({} s) y se canceló", timeout.as_secs());

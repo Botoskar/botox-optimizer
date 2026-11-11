@@ -49,7 +49,8 @@ $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 [ordered]@{
   pc = $env:COMPUTERNAME
   admin = $admin
-  laptop = [bool](Get-CimInstance Win32_Battery)
+  # Batería y chasis que no sea de escritorio: un UPS por USB figura como batería (mismo criterio que hwscan.rs).
+  laptop = [bool](Get-CimInstance Win32_Battery) -and -not @(@((Get-CimInstance Win32_SystemEnclosure).ChassisTypes) | Where-Object { $_ -in 3,4,5,6,7,13,15,16,17,23,24,35,36 }).Count
   cpu = [ordered]@{ name = "$($cpu.Name)".Trim(); maker = $cpu.Manufacturer; cores = $cpu.NumberOfCores; threads = $cpu.NumberOfLogicalProcessors; mhz = $cpu.MaxClockSpeed; l3MB = [math]::Round($cpu.L3CacheSize / 1024) }
   gpus = $gpus
   ram = [ordered]@{ gb = [math]::Round($cs.TotalPhysicalMemory / 1GB); modules = $mods }
