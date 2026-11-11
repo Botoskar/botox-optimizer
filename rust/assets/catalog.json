@@ -35,7 +35,9 @@
     "apply": "$L=@(); RegApply 'ultimate' $L\nLog '› $g=''3f5c8a2e-6b1d-4e7a-9c0f-ff0000000001''; if(-not ((powercfg /list | Out-String) -match $g)){ powercfg -duplicatescheme e9a42b02-d5df-448d-aa00-03f14…' 'cmd'\n$g='3f5c8a2e-6b1d-4e7a-9c0f-ff0000000001'; if(-not ((powercfg /list | Out-String) -match $g)){ powercfg -duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61 $g | Out-Null; powercfg /changename $g 'Botox Optimizer Ultimate' | Out-Null }; powercfg /setactive $g",
     "revert": "Log '› powercfg /setactive 381b4222-f694-41f0-9685-ff5bb260df2e; if((powercfg /list | Out-String) -match ''3f5c8a2e''){ powercfg /delete 3f5c8a2e-6b1d-4e7a-9c0…' 'cmd'\npowercfg /setactive 381b4222-f694-41f0-9685-ff5bb260df2e; if((powercfg /list | Out-String) -match '3f5c8a2e'){ powercfg /delete 3f5c8a2e-6b1d-4e7a-9c0f-ff0000000001 }",
     "check": "\n$L=@()\n$c=@([bool]((powercfg /getactivescheme | Out-String) -match '3f5c8a2e') | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Duplica el plan oculto \"Máximo rendimiento\" (e9a42b02-…) con el nombre \"Botox Optimizer Ultimate\" y lo activa. Revertir vuelve al plan Equilibrado y borra la copia.",
+   "source": null
   },
   {
    "id": "gamemode",
@@ -70,7 +72,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Prende AutoGameModeEnabled y AllowAutoGameMode en HKCU\\Software\\Microsoft\\GameBar, lo mismo que el interruptor \"Modo de juego\" de Configuración > Juegos.",
+   "source": "https://learn.microsoft.com/es-es/windows/apps/develop/settings/settings-windows-11"
   },
   {
    "id": "hags",
@@ -97,7 +101,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Pone HwSchMode = 2 en GraphicsDrivers. La GPU pasa a tener su propio procesador de programación en vez de depender de un hilo de alta prioridad del CPU. Solo funciona si el driver lo soporta; necesita reiniciar.",
+   "source": "https://devblogs.microsoft.com/directx/hardware-accelerated-gpu-scheduling/"
   },
   {
    "id": "gamedvr",
@@ -140,7 +146,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Apaga GameDVR_Enabled y AppCaptureEnabled para tu usuario y pone la directiva AllowGameDVR = 0, que bloquea la grabación de Game Bar en toda la PC.",
+   "source": "https://learn.microsoft.com/es-es/windows/client-management/mdm/policy-csp-applicationmanagement"
   },
   {
    "id": "fso",
@@ -191,7 +199,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Ajusta los valores GameDVR_FSEBehavior* en HKCU\\System\\GameConfigStore para que los juegos no usen las optimizaciones de pantalla completa. Microsoft muestra cómo apagarlas por juego si dan problemas de rendimiento o de input lag.",
+   "source": "https://devblogs.microsoft.com/directx/demystifying-full-screen-optimizations/"
   },
   {
    "id": "windowedopt",
@@ -218,7 +228,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Agrega SwapEffectUpgradeEnable=1 a DirectXUserGlobalSettings, lo mismo que \"Optimizaciones para juegos en ventana\" en Configuración > Pantalla > Gráficos.",
+   "source": "https://support.microsoft.com/es-es/windows/hardware/display-graphics/optimizations-for-windowed-games-in-windows-11"
   },
   {
    "id": "sysresp",
@@ -245,7 +257,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "SystemResponsiveness es el porcentaje de CPU que el programador multimedia (MMCSS) garantiza a las tareas de baja prioridad. Windows usa 20; esto lo baja a 10, el mínimo que acepta.",
+   "source": "https://learn.microsoft.com/es-es/windows/win32/procthread/multimedia-class-scheduler-service"
   },
   {
    "id": "mmcss",
@@ -296,7 +310,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Cambia la tarea \"Games\" de MMCSS: Priority 6, Scheduling Category High, SFIO Priority High y GPU Priority 8. Según Microsoft, GPU Priority todavía no se usa y, con categoría High, Priority se toma siempre como 2.",
+   "source": "https://learn.microsoft.com/es-es/windows/win32/procthread/multimedia-class-scheduler-service"
   },
   {
    "id": "win32prio",
@@ -323,7 +339,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Win32PrioritySeparation define cuánto tiempo de CPU recibe cada hilo y cuánto más recibe la ventana activa. 0x26 = intervalos cortos y variables, con el máximo extra para el primer plano. Windows usa 2.",
+   "source": "https://learn.microsoft.com/es-es/previous-versions/cc976120(v=technet.10)"
   },
   {
    "id": "powerthrottle",
@@ -350,7 +368,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "PowerThrottlingOff = 1 apaga para toda la PC el \"Power Throttling\", que pone en modo de bajo consumo al CPU cuando corre trabajo que Windows considera de fondo.",
+   "source": "https://blogs.windows.com/windows-insider/2017/04/18/introducing-power-throttling/"
   },
   {
    "id": "timerres",
@@ -377,7 +397,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Desde Windows 11, si un proceso queda minimizado u oculto, Windows deja de garantizarle la resolución de timer que pidió. GlobalTimerResolutionRequests = 1 vuelve al comportamiento de Windows 10. La clave en sí no está documentada por Microsoft; la fuente explica el cambio de Windows 11.",
+   "source": "https://learn.microsoft.com/es-es/windows/win32/api/timeapi/nf-timeapi-timebeginperiod"
   },
   {
    "id": "dynamictick",
@@ -399,7 +421,9 @@
     "apply": "$L=@(); RegApply 'dynamictick' $L\nLog '› $o = bcdedit /set ''{current}'' disabledynamictick yes 2>&1; if ($LASTEXITCODE) { throw (''bcdedit: '' + (($o | Out-String).Trim() -replace ''\\s+'', '' '')) }' 'cmd'\n$o = bcdedit /set '{current}' disabledynamictick yes 2>&1; if ($LASTEXITCODE) { throw ('bcdedit: ' + (($o | Out-String).Trim() -replace '\\s+', ' ')) }",
     "revert": "Log '› $o = bcdedit /deletevalue ''{current}'' disabledynamictick 2>&1; if ($LASTEXITCODE) { throw (''bcdedit: '' + (($o | Out-String).Trim() -replace ''\\s+'', '' ''…' 'cmd'\n$o = bcdedit /deletevalue '{current}' disabledynamictick 2>&1; if ($LASTEXITCODE) { throw ('bcdedit: ' + (($o | Out-String).Trim() -replace '\\s+', ' ')) }",
     "check": "\n$L=@()\n$c=@([bool]((bcdedit /enum '{current}' | Out-String) -match 'disabledynamictick') | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Corre bcdedit /set {current} disabledynamictick yes. Microsoft documenta esta opción como pensada solo para depurar: probala y revertila si no notás diferencia.",
+   "source": "https://learn.microsoft.com/es-es/windows-hardware/drivers/devtest/bcdedit--set"
   },
   {
    "id": "vbs",
@@ -442,7 +466,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Pone en 0 EnableVirtualizationBasedSecurity, la Integridad de memoria (HypervisorEnforcedCodeIntegrity) y LsaCfgFlags (Credential Guard). Es lo mismo que apagar \"Integridad de memoria\" en Seguridad de Windows.",
+   "source": "https://learn.microsoft.com/es-es/windows/security/hardware-security/enable-virtualization-based-protection-of-code-integrity"
   },
   {
    "id": "mouseaccel",
@@ -485,7 +511,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "MouseSpeed, MouseThreshold1 y MouseThreshold2 en 0 en HKCU\\Control Panel\\Mouse: son los tres valores que Windows usa para la aceleración (SPI_SETMOUSE).",
+   "source": "https://learn.microsoft.com/es-es/windows/win32/api/winuser/nf-winuser-systemparametersinfoa"
   },
   {
    "id": "keyboard",
@@ -520,7 +548,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "KeyboardDelay = 0 (la espera más corta antes de repetir) y KeyboardSpeed = 31 (la repetición más rápida), los mismos rangos que SPI_SETKEYBOARDDELAY y SPI_SETKEYBOARDSPEED.",
+   "source": "https://learn.microsoft.com/es-es/windows/win32/api/winuser/nf-winuser-systemparametersinfoa"
   },
   {
    "id": "stickykeys",
@@ -563,7 +593,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Cambia los Flags de StickyKeys, ToggleKeys y Keyboard Response para que sus atajos (Shift 5 veces, Bloq Num 5 s, Shift derecho 8 s) no abran el aviso. Las funciones siguen disponibles desde Accesibilidad.",
+   "source": "https://learn.microsoft.com/es-es/windows/win32/api/winuser/ns-winuser-stickykeys"
   },
   {
    "id": "bgapps",
@@ -598,7 +630,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "GlobalUserDisabled = 1 y BackgroundAppGlobalToggle = 0 en tu usuario: las apps de la Tienda no corren de fondo. Las notificaciones de esas apps pueden llegar tarde.",
+   "source": null
   },
   {
    "id": "usbpower",
@@ -620,7 +654,9 @@
     "apply": "$L=@(Get-ChildItem 'HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\USB' -Recurse -ErrorAction SilentlyContinue | Where-Object PSChildName -eq 'Device Parameters' | ForEach-Object { $p = 'HKLM:' + $_.Name.Substring(18); ,@($p,'EnhancedPowerManagementEnabled',0,'DWord',$null); ,@($p,'AllowIdleIrpInD3',0,'DWord',$null) }); RegApply 'usbpower' $L",
     "revert": "$L=@(Get-ChildItem 'HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\USB' -Recurse -ErrorAction SilentlyContinue | Where-Object PSChildName -eq 'Device Parameters' | ForEach-Object { $p = 'HKLM:' + $_.Name.Substring(18); ,@($p,'EnhancedPowerManagementEnabled',0,'DWord',$null); ,@($p,'AllowIdleIrpInD3',0,'DWord',$null) }); RegRevert 'usbpower' $L",
     "check": "\n$L=@(Get-ChildItem 'HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\USB' -Recurse -ErrorAction SilentlyContinue | Where-Object PSChildName -eq 'Device Parameters' | ForEach-Object { $p = 'HKLM:' + $_.Name.Substring(18); ,@($p,'EnhancedPowerManagementEnabled',0,'DWord',$null); ,@($p,'AllowIdleIrpInD3',0,'DWord',$null) })\n$c=@((RegCheck $L) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Pone EnhancedPowerManagementEnabled = 0 y AllowIdleIrpInD3 = 0 en Device Parameters de cada dispositivo USB que Windows tiene registrado. Necesita reiniciar.",
+   "source": null
   },
   {
    "id": "fth",
@@ -647,7 +683,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Fault Tolerant Heap aplica arreglos al montón de memoria de un programa que crasheó varias veces. FTH\\Enabled = 0 lo apaga para toda la PC.",
+   "source": "https://learn.microsoft.com/es-es/previous-versions/windows/win32/win7appqual/fault-tolerant-heap"
   },
   {
    "id": "hibernate",
@@ -669,7 +707,9 @@
     "apply": "$L=@(); RegApply 'hibernate' $L\nLog '› powercfg /h off' 'cmd'\npowercfg /h off",
     "revert": "Log '› powercfg /h on' 'cmd'\npowercfg /h on",
     "check": "\n$L=@()\n$c=@([bool]((Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Power').HibernateEnabled -eq 0) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Corre powercfg /h off: borra hiberfil.sys y apaga la hibernación. También apaga el Inicio rápido, que depende de ella. Revertir corre powercfg /h on.",
+   "source": "https://learn.microsoft.com/es-es/windows-hardware/design/device-experiences/powercfg-command-line-options"
   },
   {
    "id": "faststartup",
@@ -696,7 +736,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "HiberbootEnabled = 0. Con el Inicio rápido, \"apagar\" cierra tu sesión pero hiberna el kernel; sin él, cada encendido carga el kernel y los drivers desde cero.",
+   "source": "https://learn.microsoft.com/es-es/windows-hardware/drivers/kernel/distinguishing-fast-startup-from-wake-from-hibernation"
   },
   {
    "id": "usbsuspend",
@@ -721,7 +763,9 @@
      "def": 1
     }
    ],
-   "ps": null
+   "ps": null,
+   "details": "En el plan de energía activo, \"Configuración de suspensión selectiva de USB\" pasa a Deshabilitado (enchufada y con batería).",
+   "source": "https://learn.microsoft.com/es-es/windows-hardware/drivers/usbcon/usb-selective-suspend"
   },
   {
    "id": "aspm",
@@ -746,7 +790,9 @@
      "def": 1
     }
    ],
-   "ps": null
+   "ps": null,
+   "details": "En el plan de energía activo, \"PCI Express > Administración de energía del estado de vínculos\" pasa a Desactivado.",
+   "source": "https://learn.microsoft.com/es-es/windows-hardware/customize/power-settings/pci-express-settings-link-state-power-management"
   },
   {
    "id": "coreparking",
@@ -771,7 +817,9 @@
      "def": 10
     }
    ],
-   "ps": null
+   "ps": null,
+   "details": "En el plan de energía activo, el mínimo de núcleos sin estacionar (CPMINCORES) pasa a 100%.",
+   "source": "https://learn.microsoft.com/es-es/windows-hardware/customize/power-settings/configure-processor-power-management-options"
   },
   {
    "id": "cpuboost",
@@ -796,7 +844,9 @@
      "def": 1
     }
    ],
-   "ps": null
+   "ps": null,
+   "details": "En el plan de energía activo, \"Modo de aumento del rendimiento del procesador\" (PERFBOOSTMODE) pasa a 2, Agresivo.",
+   "source": "https://learn.microsoft.com/es-es/windows-hardware/customize/power-settings/options-for-perf-state-engine-perfboostmode"
   },
   {
    "id": "cpumin",
@@ -821,7 +871,9 @@
      "def": 5
     }
    ],
-   "ps": null
+   "ps": null,
+   "details": "En el plan de energía activo, \"Estado mínimo del procesador\" pasa a 100%. Es el mismo valor que Microsoft usa de ejemplo en su perfil de energía para el Modo de juego.",
+   "source": "https://learn.microsoft.com/es-es/windows-hardware/customize/power-settings/configure-processor-power-management-options"
   },
   {
    "id": "diskidle",
@@ -846,7 +898,9 @@
      "def": 1200
     }
    ],
-   "ps": null
+   "ps": null,
+   "details": "En el plan de energía activo, \"Apagar el disco duro tras\" pasa a Nunca (0). Windows usa 20 minutos.",
+   "source": null
   },
   {
    "id": "netthrottle",
@@ -873,7 +927,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "NetworkThrottlingIndex en SystemProfile de MMCSS: con 0xFFFFFFFF Windows no limita el procesamiento de paquetes de red mientras corren tareas multimedia. Windows usa 10.",
+   "source": null
   },
   {
    "id": "nagle",
@@ -895,7 +951,9 @@
     "apply": "$L=@(Get-ChildItem 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces' | Where-Object { $i = Get-ItemProperty $_.PSPath; $i.DhcpIPAddress -or ($i.IPAddress -and $i.IPAddress[0]) } | ForEach-Object { $p = 'HKLM:' + $_.Name.Substring(18); ,@($p,'TcpAckFrequency',1,'DWord',$null); ,@($p,'TCPNoDelay',1,'DWord',$null); ,@($p,'TcpDelAckTicks',0,'DWord',$null) }); RegApply 'nagle' $L",
     "revert": "$L=@(Get-ChildItem 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces' | Where-Object { $i = Get-ItemProperty $_.PSPath; $i.DhcpIPAddress -or ($i.IPAddress -and $i.IPAddress[0]) } | ForEach-Object { $p = 'HKLM:' + $_.Name.Substring(18); ,@($p,'TcpAckFrequency',1,'DWord',$null); ,@($p,'TCPNoDelay',1,'DWord',$null); ,@($p,'TcpDelAckTicks',0,'DWord',$null) }); RegRevert 'nagle' $L",
     "check": "\n$L=@(Get-ChildItem 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces' | Where-Object { $i = Get-ItemProperty $_.PSPath; $i.DhcpIPAddress -or ($i.IPAddress -and $i.IPAddress[0]) } | ForEach-Object { $p = 'HKLM:' + $_.Name.Substring(18); ,@($p,'TcpAckFrequency',1,'DWord',$null); ,@($p,'TCPNoDelay',1,'DWord',$null); ,@($p,'TcpDelAckTicks',0,'DWord',$null) })\n$c=@((RegCheck $L) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Pone TcpAckFrequency = 1, TCPNoDelay = 1 y TcpDelAckTicks = 0 en cada placa de red con IP. La fuente explica TCP_NODELAY, la opción con la que un programa apaga Nagle en su conexión. No cambia nada en juegos que usan UDP.",
+   "source": "https://learn.microsoft.com/es-es/windows/win32/winsock/ipproto-tcp-socket-options"
   },
   {
    "id": "tcpparams",
@@ -946,7 +1004,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "En Tcpip\\Parameters: DefaultTTL 64, Tcp1323Opts 1 (escalado de ventana), MaxUserPort 65534 (más puertos de salida; Microsoft documenta este valor) y TcpTimedWaitDelay 30 s.",
+   "source": "https://learn.microsoft.com/es-es/troubleshoot/windows-client/networking/connect-tcp-greater-than-5000-error-wsaenobufs-10055"
   },
   {
    "id": "qos",
@@ -973,7 +1033,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Directiva NonBestEffortLimit = 0 en Psched: el Programador de paquetes QoS no reserva ancho de banda para tráfico prioritario. Si nada usa QoS, no cambia la velocidad.",
+   "source": null
   },
   {
    "id": "deliveryopt",
@@ -1000,7 +1062,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Directiva DODownloadMode = 0: las actualizaciones se bajan solo por HTTP, sin compartir partes con otras PC.",
+   "source": "https://learn.microsoft.com/es-es/windows/deployment/do/waas-delivery-optimization-reference"
   },
   {
    "id": "nicpower",
@@ -1022,7 +1086,9 @@
     "apply": "$L=@(foreach ($a in Nics) { $g = \"$($a.InterfaceGuid)\"; Get-ChildItem 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e972-e325-11ce-bfc1-08002be10318}' -ErrorAction SilentlyContinue | Where-Object { (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).NetCfgInstanceId -eq $g } | ForEach-Object { ,@(('HKLM:' + $_.Name.Substring(18)),'PnPCapabilities',24,'DWord',$null) } }); RegApply 'nicpower' $L\nNicApply 'nicpower' @{'*EEE'='0';'EEE'='0';'AdvancedEEE'='0';'EnableGreenEthernet'='0';'GigaLite'='0';'PowerSavingMode'='0';'EEELinkAdvertisement'='0';'ReduceSpeedOnPowerDown'='0';'ULPMode'='0';'SipsEnabled'='0'}",
     "revert": "$L=@(foreach ($a in Nics) { $g = \"$($a.InterfaceGuid)\"; Get-ChildItem 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e972-e325-11ce-bfc1-08002be10318}' -ErrorAction SilentlyContinue | Where-Object { (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).NetCfgInstanceId -eq $g } | ForEach-Object { ,@(('HKLM:' + $_.Name.Substring(18)),'PnPCapabilities',24,'DWord',$null) } }); RegRevert 'nicpower' $L\nNicRevert 'nicpower' @{'*EEE'='0';'EEE'='0';'AdvancedEEE'='0';'EnableGreenEthernet'='0';'GigaLite'='0';'PowerSavingMode'='0';'EEELinkAdvertisement'='0';'ReduceSpeedOnPowerDown'='0';'ULPMode'='0';'SipsEnabled'='0'}",
     "check": "\n$L=@(foreach ($a in Nics) { $g = \"$($a.InterfaceGuid)\"; Get-ChildItem 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e972-e325-11ce-bfc1-08002be10318}' -ErrorAction SilentlyContinue | Where-Object { (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).NetCfgInstanceId -eq $g } | ForEach-Object { ,@(('HKLM:' + $_.Name.Substring(18)),'PnPCapabilities',24,'DWord',$null) } })\n$c=@((RegCheck $L), (NicCheck @{'*EEE'='0';'EEE'='0';'AdvancedEEE'='0';'EnableGreenEthernet'='0';'GigaLite'='0';'PowerSavingMode'='0';'EEELinkAdvertisement'='0';'ReduceSpeedOnPowerDown'='0';'ULPMode'='0';'SipsEnabled'='0'}) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "En cada placa de red física, apaga \"Permitir que el equipo apague este dispositivo\" y las opciones de ahorro del driver (EEE, Green Ethernet) si existen. Guarda lo que había para revertir.",
+   "source": null
   },
   {
    "id": "niclatency",
@@ -1044,7 +1110,9 @@
     "apply": "$L=@(); RegApply 'niclatency' $L\nNicApply 'niclatency' @{'*InterruptModeration'='0';'*FlowControl'='0';'*LsoV2IPv4'='0';'*LsoV2IPv6'='0'}",
     "revert": "NicRevert 'niclatency' @{'*InterruptModeration'='0';'*FlowControl'='0';'*LsoV2IPv4'='0';'*LsoV2IPv6'='0'}",
     "check": "\n$L=@()\n$c=@((NicCheck @{'*InterruptModeration'='0';'*FlowControl'='0';'*LsoV2IPv4'='0';'*LsoV2IPv6'='0'}) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "En cada placa de red física, pone en 0 Interrupt Moderation, Flow Control y Large Send Offload si el driver los tiene. Sin respaldo, revertir vuelve a los valores por defecto del driver.",
+   "source": null
   },
   {
    "id": "dns",
@@ -1066,7 +1134,9 @@
     "apply": "$n=@(Nics)\n$L=@(); RegApply 'dns' $L\nLog '› $b=@(foreach($a in Nics){ $g=(Get-NetAdapter -Name $a.Name).InterfaceGuid; [pscustomobject]@{ i=$a.ifIndex; ns=[string](Get-ItemProperty \"HKLM:\\SYSTEM…' 'cmd'\n$b=@(foreach($a in Nics){ $g=(Get-NetAdapter -Name $a.Name).InterfaceGuid; [pscustomobject]@{ i=$a.ifIndex; ns=[string](Get-ItemProperty \"HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\$g\").NameServer } }); Save-Bk 'dns' $b; foreach($a in Nics){ Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -ServerAddresses '1.1.1.1','1.0.0.1' }; Clear-DnsClientCache",
     "revert": "$n=@(Nics)\nLog '› $b=Read-Bk ''dns''; if($null -eq $b){ foreach($a in Nics){ Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -ResetServerAddresses } } else { foreac…' 'cmd'\n$b=Read-Bk 'dns'; if($null -eq $b){ foreach($a in Nics){ Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -ResetServerAddresses } } else { foreach($x in $b){ if($x.ns){ Set-DnsClientServerAddress -InterfaceIndex $x.i -ServerAddresses ($x.ns -split '[ ,]+') } else { Set-DnsClientServerAddress -InterfaceIndex $x.i -ResetServerAddresses } } }; Remove-Bk 'dns'; Clear-DnsClientCache",
     "check": "$n=@(Nics)\n$L=@()\n$c=@([bool]($n.Count -gt 0 -and @($n | Where-Object { @((Get-DnsClientServerAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses)[0] -ne '1.1.1.1' }).Count -eq 0) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Configura 1.1.1.1 y 1.0.0.1 como DNS IPv4 en las placas de red activas. Guarda los que tenías y Revertir los devuelve.",
+   "source": "https://developers.cloudflare.com/1.1.1.1/setup/windows/"
   },
   {
    "id": "gpumsi",
@@ -1088,7 +1158,9 @@
     "apply": "$L=@(Get-PnpDevice -Class Display -PresentOnly -ErrorAction SilentlyContinue | Where-Object InstanceId -like 'PCI\\*' | ForEach-Object { ,@(\"HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\$($_.InstanceId)\\Device Parameters\\Interrupt Management\\MessageSignaledInterruptProperties\",'MSISupported',1,'DWord',$null) }); RegApply 'gpumsi' $L",
     "revert": "$L=@(Get-PnpDevice -Class Display -PresentOnly -ErrorAction SilentlyContinue | Where-Object InstanceId -like 'PCI\\*' | ForEach-Object { ,@(\"HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\$($_.InstanceId)\\Device Parameters\\Interrupt Management\\MessageSignaledInterruptProperties\",'MSISupported',1,'DWord',$null) }); RegRevert 'gpumsi' $L",
     "check": "\n$L=@(Get-PnpDevice -Class Display -PresentOnly -ErrorAction SilentlyContinue | Where-Object InstanceId -like 'PCI\\*' | ForEach-Object { ,@(\"HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\$($_.InstanceId)\\Device Parameters\\Interrupt Management\\MessageSignaledInterruptProperties\",'MSISupported',1,'DWord',$null) })\n$c=@((RegCheck $L) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Pone MSISupported = 1 en Interrupt Management\\MessageSignaledInterruptProperties de la GPU. El driver tiene que soportarlo; necesita reiniciar.",
+   "source": "https://learn.microsoft.com/es-es/windows-hardware/drivers/kernel/enabling-message-signaled-interrupts-in-the-registry"
   },
   {
    "id": "nvtelemetry",
@@ -1110,7 +1182,9 @@
     "apply": "$L=@(,@('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\NvTelemetryContainer','Start',4,'DWord',2,1)); RegApply 'nvtelemetry' $L\nStopSvc 'NvTelemetryContainer'\nTaskSet @('\\NvTm*','\\NVIDIA*\\NvTm*') $false",
     "revert": "$L=@(,@('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\NvTelemetryContainer','Start',4,'DWord',2,1)); RegRevert 'nvtelemetry' $L\nTaskSet @('\\NvTm*','\\NVIDIA*\\NvTm*') $true",
     "check": "\n$L=@(,@('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\NvTelemetryContainer','Start',4,'DWord',2,1))\n$c=@((RegCheck $L), (TaskCheck @('\\NvTm*','\\NVIDIA*\\NvTm*')) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Deshabilita las tareas programadas NvTm* y el servicio NvTelemetryContainer si existen. En drivers nuevos sin ellos, sale \"no aplica\".",
+   "source": null
   },
   {
    "id": "nodriverwu",
@@ -1137,7 +1211,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Directiva ExcludeWUDriversInQualityUpdate = 1: Windows Update deja de ofrecer drivers. Los drivers los actualizás vos desde NVIDIA, AMD o el fabricante.",
+   "source": "https://learn.microsoft.com/es-es/windows/client-management/mdm/policy-csp-update"
   },
   {
    "id": "mpo",
@@ -1164,7 +1240,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "OverlayTestMode = 5 en HKLM\\SOFTWARE\\Microsoft\\Windows\\Dwm apaga Multi-Plane Overlay. NVIDIA publica este mismo cambio para quien tiene parpadeos o pantallas negras. Necesita reiniciar.",
+   "source": "https://nvidia.custhelp.com/app/answers/detail/a_id/5157"
   },
   {
    "id": "amdtelemetry",
@@ -1186,7 +1264,9 @@
     "apply": "$T=@('\\AMDInstallLauncher','\\AMDLinkUpdate','\\AMDAutoUpdate*','\\ModifyLinkUpdate','\\AMDScoSupportTypeUpdate')\n$L=@(@('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\AUEPLauncher','Start',4,'DWord',2,1),@('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\AMD Crash Defender Service','Start',4,'DWord',2,1)); RegApply 'amdtelemetry' $L\nStopSvc 'AUEPLauncher'; StopSvc 'AMD Crash Defender Service'\nTaskSet $T $false",
     "revert": "$T=@('\\AMDInstallLauncher','\\AMDLinkUpdate','\\AMDAutoUpdate*','\\ModifyLinkUpdate','\\AMDScoSupportTypeUpdate')\n$L=@(@('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\AUEPLauncher','Start',4,'DWord',2,1),@('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\AMD Crash Defender Service','Start',4,'DWord',2,1)); RegRevert 'amdtelemetry' $L\nTaskSet $T $true",
     "check": "$T=@('\\AMDInstallLauncher','\\AMDLinkUpdate','\\AMDAutoUpdate*','\\ModifyLinkUpdate','\\AMDScoSupportTypeUpdate')\n$L=@(@('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\AUEPLauncher','Start',4,'DWord',2,1),@('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\AMD Crash Defender Service','Start',4,'DWord',2,1))\n$c=@((RegCheck $L), (TaskCheck $T) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Deshabilita los servicios AUEPLauncher y AMD Crash Defender y las tareas programadas de actualización de Adrenalin.",
+   "source": null
   },
   {
    "id": "lastaccess",
@@ -1213,7 +1293,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "NtfsDisableLastAccessUpdate = 0x80000001, lo mismo que fsutil behavior set disablelastaccess 1.",
+   "source": "https://learn.microsoft.com/es-es/windows-server/administration/windows-commands/fsutil-behavior"
   },
   {
    "id": "8dot3",
@@ -1240,7 +1322,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "NtfsDisable8dot3NameCreation = 1, lo mismo que fsutil behavior set disable8dot3 1. Los nombres cortos que ya existen no se borran.",
+   "source": "https://learn.microsoft.com/es-es/windows-server/administration/windows-commands/fsutil-behavior"
   },
   {
    "id": "ntfsmem",
@@ -1267,7 +1351,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "NtfsMemoryUsage = 2, lo mismo que fsutil behavior set memoryusage 2: NTFS usa más memoria para su caché.",
+   "source": "https://learn.microsoft.com/es-es/windows-server/administration/windows-commands/fsutil-behavior"
   },
   {
    "id": "pagingexec",
@@ -1294,7 +1380,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "DisablePagingExecutive = 1 en Memory Management: el código del kernel y de los drivers queda en RAM y no se pagina a disco.",
+   "source": null
   },
   {
    "id": "memcompress",
@@ -1316,7 +1404,9 @@
     "apply": "$L=@(); RegApply 'memcompress' $L\nLog '› Disable-MMAgent -MemoryCompression' 'cmd'\nDisable-MMAgent -MemoryCompression",
     "revert": "Log '› Enable-MMAgent -MemoryCompression' 'cmd'\nEnable-MMAgent -MemoryCompression",
     "check": "\n$L=@()\n$c=@([bool](-not (Get-MMAgent).MemoryCompression) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Corre Disable-MMAgent -MemoryCompression. Revertir corre Enable-MMAgent -MemoryCompression.",
+   "source": "https://learn.microsoft.com/es-es/powershell/module/mmagent/disable-mmagent"
   },
   {
    "id": "svchost",
@@ -1338,7 +1428,9 @@
     "apply": "$L=@(,@('HKLM:\\SYSTEM\\CurrentControlSet\\Control','SvcHostSplitThresholdInKB',[int]((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory/1KB),'DWord',3670016)); RegApply 'svchost' $L",
     "revert": "$L=@(,@('HKLM:\\SYSTEM\\CurrentControlSet\\Control','SvcHostSplitThresholdInKB',[int]((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory/1KB),'DWord',3670016)); RegRevert 'svchost' $L",
     "check": "\n$L=@(,@('HKLM:\\SYSTEM\\CurrentControlSet\\Control','SvcHostSplitThresholdInKB',[int]((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory/1KB),'DWord',3670016))\n$c=@((RegCheck $L) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Con más de 3,5 GB de RAM, Windows corre cada servicio en su propio svchost.exe. SvcHostSplitThresholdInKB = tu RAM total hace que los vuelva a agrupar.",
+   "source": "https://learn.microsoft.com/es-es/windows/application-management/svchost-service-refactoring"
   },
   {
    "id": "sysmain",
@@ -1360,7 +1452,9 @@
     "apply": "$L=@(,@('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\SysMain','Start',4,'DWord',2,1)); RegApply 'sysmain' $L\nStopSvc 'SysMain'\nLog '› Stop-Service SysMain -Force -ErrorAction SilentlyContinue' 'cmd'\nStop-Service SysMain -Force -ErrorAction SilentlyContinue",
     "revert": "$L=@(,@('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\SysMain','Start',4,'DWord',2,1)); RegRevert 'sysmain' $L",
     "check": "\n$L=@(,@('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\SysMain','Start',4,'DWord',2,1))\n$c=@((RegCheck $L) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Deshabilita el servicio SysMain (Superfetch), que precarga en RAM los programas que más usás.",
+   "source": null
   },
   {
    "id": "wsearch",
@@ -1382,7 +1476,9 @@
     "apply": "$L=@(,@('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\WSearch','Start',4,'DWord',2,1)); RegApply 'wsearch' $L\nStopSvc 'WSearch'\nLog '› Stop-Service WSearch -Force -ErrorAction SilentlyContinue' 'cmd'\nStop-Service WSearch -Force -ErrorAction SilentlyContinue",
     "revert": "$L=@(,@('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\WSearch','Start',4,'DWord',2,1)); RegRevert 'wsearch' $L\nLog '› Start-Service WSearch -ErrorAction SilentlyContinue' 'cmd'\nStart-Service WSearch -ErrorAction SilentlyContinue",
     "check": "\n$L=@(,@('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\WSearch','Start',4,'DWord',2,1))\n$c=@((RegCheck $L) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Deshabilita el servicio WSearch, que mantiene el índice de archivos, mails y contenido para la búsqueda.",
+   "source": null
   },
   {
    "id": "reserved",
@@ -1404,7 +1500,9 @@
     "apply": "$L=@(); RegApply 'reserved' $L\nLog '› Set-WindowsReservedStorageState -State Disabled' 'cmd'\nSet-WindowsReservedStorageState -State Disabled",
     "revert": "Log '› Set-WindowsReservedStorageState -State Enabled' 'cmd'\nSet-WindowsReservedStorageState -State Enabled",
     "check": "\n$L=@()\n$c=@([bool]((Get-WindowsReservedStorageState).ReservedStorageState -eq 'Disabled') | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Corre Set-WindowsReservedStorageState -State Disabled. Solo se puede si no hay una actualización en curso.",
+   "source": "https://learn.microsoft.com/es-es/windows-hardware/manufacture/desktop/dism-storage-reserve"
   },
   {
    "id": "svcunneeded",
@@ -1479,7 +1577,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Deshabilita Fax, RetailDemo, MapsBroker, lfsvc, wisvc, WMPNetworkSvc y TrkWks si existen. La fuente es la guía de Microsoft para Windows Server, que describe cada servicio.",
+   "source": "https://learn.microsoft.com/es-es/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server"
   },
   {
    "id": "svcxbox",
@@ -1522,7 +1622,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Deshabilita XblAuthManager, XblGameSave y XboxNetApiSvc. La guía de Microsoft para Windows Server recomienda deshabilitarlos.",
+   "source": "https://learn.microsoft.com/es-es/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server"
   },
   {
    "id": "svcprint",
@@ -1544,7 +1646,9 @@
     "apply": "$L=@(,@('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Spooler','Start',4,'DWord',2,1)); RegApply 'svcprint' $L\nStopSvc 'Spooler'\nLog '› Stop-Service Spooler -Force -ErrorAction SilentlyContinue' 'cmd'\nStop-Service Spooler -Force -ErrorAction SilentlyContinue",
     "revert": "$L=@(,@('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Spooler','Start',4,'DWord',2,1)); RegRevert 'svcprint' $L\nLog '› Start-Service Spooler -ErrorAction SilentlyContinue' 'cmd'\nStart-Service Spooler -ErrorAction SilentlyContinue",
     "check": "\n$L=@(,@('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Spooler','Start',4,'DWord',2,1))\n$c=@((RegCheck $L) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Deshabilita Spooler. Microsoft lo considera seguro de deshabilitar si la PC no es servidor de impresión; sin él no podés imprimir.",
+   "source": "https://learn.microsoft.com/es-es/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server"
   },
   {
    "id": "svcdiag",
@@ -1571,7 +1675,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Deshabilita PcaSvc (Asistente para la compatibilidad de programas). La guía de Microsoft lo marca como seguro de deshabilitar.",
+   "source": "https://learn.microsoft.com/es-es/windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server"
   },
   {
    "id": "gvalorant",
@@ -1606,7 +1712,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Crea la clave Image File Execution Options\\<juego>.exe\\PerfOptions con CpuPriorityClass = 3 (alta) e IoPriority = 3 (alta). Windows la lee cada vez que se abre ese .exe; no hay un programa corriendo de fondo. Es una clave sin documentación oficial de Microsoft.",
+   "source": null
   },
   {
    "id": "gcs2",
@@ -1641,7 +1749,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Crea la clave Image File Execution Options\\<juego>.exe\\PerfOptions con CpuPriorityClass = 3 (alta) e IoPriority = 3 (alta). Windows la lee cada vez que se abre ese .exe; no hay un programa corriendo de fondo. Es una clave sin documentación oficial de Microsoft.",
+   "source": null
   },
   {
    "id": "gfortnite",
@@ -1676,7 +1786,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Crea la clave Image File Execution Options\\<juego>.exe\\PerfOptions con CpuPriorityClass = 3 (alta) e IoPriority = 3 (alta). Windows la lee cada vez que se abre ese .exe; no hay un programa corriendo de fondo. Es una clave sin documentación oficial de Microsoft.",
+   "source": null
   },
   {
    "id": "gaion2",
@@ -1711,7 +1823,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Crea la clave Image File Execution Options\\<juego>.exe\\PerfOptions con CpuPriorityClass = 3 (alta) e IoPriority = 3 (alta). Windows la lee cada vez que se abre ese .exe; no hay un programa corriendo de fondo. Es una clave sin documentación oficial de Microsoft.",
+   "source": null
   },
   {
    "id": "lap-ac",
@@ -1754,7 +1868,9 @@
      "def": 1
     }
    ],
-   "ps": null
+   "ps": null,
+   "details": "Cambia solo los valores \"enchufado\" del plan activo: boost agresivo, núcleos sin estacionar y sin ahorro de PCIe ni de USB. Los valores con batería no se tocan.",
+   "source": null
   },
   {
    "id": "lap-dgpu",
@@ -1776,7 +1892,9 @@
     "apply": "$L=@(foreach($d in @([IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq 'Fixed' -and $_.IsReady } | ForEach-Object { $_.RootDirectory.FullName })){ foreach($r in @('Riot Games\\VALORANT\\live\\ShooterGame\\Binaries\\Win64\\VALORANT-Win64-Shipping.exe','Epic Games\\Fortnite\\FortniteGame\\Binaries\\Win64\\FortniteClient-Win64-Shipping.exe','Program Files\\Epic Games\\Fortnite\\FortniteGame\\Binaries\\Win64\\FortniteClient-Win64-Shipping.exe','SteamLibrary\\steamapps\\common\\Counter-Strike Global Offensive\\game\\bin\\win64\\cs2.exe','Steam\\steamapps\\common\\Counter-Strike Global Offensive\\game\\bin\\win64\\cs2.exe','Program Files (x86)\\Steam\\steamapps\\common\\Counter-Strike Global Offensive\\game\\bin\\win64\\cs2.exe','SteamLibrary\\steamapps\\common\\AION2\\Aion2\\Binaries\\Win64\\AION2.exe','Steam\\steamapps\\common\\AION2\\Aion2\\Binaries\\Win64\\AION2.exe','Program Files (x86)\\Steam\\steamapps\\common\\AION2\\Aion2\\Binaries\\Win64\\AION2.exe')){ $f=$d+$r; if(Test-Path -LiteralPath $f){ ,@('HKCU:\\Software\\Microsoft\\DirectX\\UserGpuPreferences',$f,'GpuPreference=2;','String',$null) } } }); RegApply 'lap-dgpu' $L\nLog '› if(-not @($L).Count){ Log ''No encontré Valorant, CS2, Fortnite ni AION 2 en las rutas habituales'' ''warn'' }' 'cmd'\nif(-not @($L).Count){ Log 'No encontré Valorant, CS2, Fortnite ni AION 2 en las rutas habituales' 'warn' }",
     "revert": "$L=@(foreach($d in @([IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq 'Fixed' -and $_.IsReady } | ForEach-Object { $_.RootDirectory.FullName })){ foreach($r in @('Riot Games\\VALORANT\\live\\ShooterGame\\Binaries\\Win64\\VALORANT-Win64-Shipping.exe','Epic Games\\Fortnite\\FortniteGame\\Binaries\\Win64\\FortniteClient-Win64-Shipping.exe','Program Files\\Epic Games\\Fortnite\\FortniteGame\\Binaries\\Win64\\FortniteClient-Win64-Shipping.exe','SteamLibrary\\steamapps\\common\\Counter-Strike Global Offensive\\game\\bin\\win64\\cs2.exe','Steam\\steamapps\\common\\Counter-Strike Global Offensive\\game\\bin\\win64\\cs2.exe','Program Files (x86)\\Steam\\steamapps\\common\\Counter-Strike Global Offensive\\game\\bin\\win64\\cs2.exe','SteamLibrary\\steamapps\\common\\AION2\\Aion2\\Binaries\\Win64\\AION2.exe','Steam\\steamapps\\common\\AION2\\Aion2\\Binaries\\Win64\\AION2.exe','Program Files (x86)\\Steam\\steamapps\\common\\AION2\\Aion2\\Binaries\\Win64\\AION2.exe')){ $f=$d+$r; if(Test-Path -LiteralPath $f){ ,@('HKCU:\\Software\\Microsoft\\DirectX\\UserGpuPreferences',$f,'GpuPreference=2;','String',$null) } } }); RegRevert 'lap-dgpu' $L",
     "check": "\n$L=@(foreach($d in @([IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq 'Fixed' -and $_.IsReady } | ForEach-Object { $_.RootDirectory.FullName })){ foreach($r in @('Riot Games\\VALORANT\\live\\ShooterGame\\Binaries\\Win64\\VALORANT-Win64-Shipping.exe','Epic Games\\Fortnite\\FortniteGame\\Binaries\\Win64\\FortniteClient-Win64-Shipping.exe','Program Files\\Epic Games\\Fortnite\\FortniteGame\\Binaries\\Win64\\FortniteClient-Win64-Shipping.exe','SteamLibrary\\steamapps\\common\\Counter-Strike Global Offensive\\game\\bin\\win64\\cs2.exe','Steam\\steamapps\\common\\Counter-Strike Global Offensive\\game\\bin\\win64\\cs2.exe','Program Files (x86)\\Steam\\steamapps\\common\\Counter-Strike Global Offensive\\game\\bin\\win64\\cs2.exe','SteamLibrary\\steamapps\\common\\AION2\\Aion2\\Binaries\\Win64\\AION2.exe','Steam\\steamapps\\common\\AION2\\Aion2\\Binaries\\Win64\\AION2.exe','Program Files (x86)\\Steam\\steamapps\\common\\AION2\\Aion2\\Binaries\\Win64\\AION2.exe')){ $f=$d+$r; if(Test-Path -LiteralPath $f){ ,@('HKCU:\\Software\\Microsoft\\DirectX\\UserGpuPreferences',$f,'GpuPreference=2;','String',$null) } } })\n$c=@((RegCheck $L), [bool](@($L).Count -gt 0) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Busca los .exe de Valorant, CS2, Fortnite y AION 2 en las rutas habituales y les pone GpuPreference=2 (alto rendimiento) en UserGpuPreferences, lo mismo que Configuración > Pantalla > Gráficos.",
+   "source": null
   },
   {
    "id": "diagtrack",
@@ -1798,7 +1916,9 @@
     "apply": "$L=@(@('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\DiagTrack','Start',4,'DWord',2,1),@('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\dmwappushservice','Start',4,'DWord',3,1)); RegApply 'diagtrack' $L\nStopSvc 'DiagTrack'; StopSvc 'dmwappushservice'\nLog '› Stop-Service DiagTrack -Force -ErrorAction SilentlyContinue' 'cmd'\nStop-Service DiagTrack -Force -ErrorAction SilentlyContinue",
     "revert": "$L=@(@('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\DiagTrack','Start',4,'DWord',2,1),@('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\dmwappushservice','Start',4,'DWord',3,1)); RegRevert 'diagtrack' $L",
     "check": "\n$L=@(@('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\DiagTrack','Start',4,'DWord',2,1),@('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\dmwappushservice','Start',4,'DWord',3,1))\n$c=@((RegCheck $L) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Deshabilita DiagTrack (Experiencias del usuario y telemetría asociadas) y dmwappushservice, los servicios que juntan y envían los datos de diagnóstico.",
+   "source": "https://learn.microsoft.com/es-es/windows/privacy/configure-windows-diagnostic-data-in-your-organization"
   },
   {
    "id": "telemetrypol",
@@ -1825,7 +1945,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Directiva AllowTelemetry = 0. El nivel efectivo depende de tu edición de Windows; la fuente explica cada nivel.",
+   "source": "https://learn.microsoft.com/es-es/windows/privacy/configure-windows-diagnostic-data-in-your-organization"
   },
   {
    "id": "telemetrytasks",
@@ -1847,7 +1969,9 @@
     "apply": "$T=@('\\Microsoft\\Windows\\Application Experience\\Microsoft Compatibility Appraiser*','\\Microsoft\\Windows\\Application Experience\\ProgramDataUpdater','\\Microsoft\\Windows\\Application Experience\\MareBackup','\\Microsoft\\Windows\\Application Experience\\PcaPatchDbTask','\\Microsoft\\Windows\\Application Experience\\StartupAppTask','\\Microsoft\\Windows\\Customer Experience Improvement Program\\*','\\Microsoft\\Windows\\Autochk\\Proxy','\\Microsoft\\Windows\\DiskDiagnostic\\Microsoft-Windows-DiskDiagnosticDataCollector','\\Microsoft\\Windows\\Feedback\\Siuf\\*')\n$L=@(); RegApply 'telemetrytasks' $L\nTaskSet $T $false",
     "revert": "$T=@('\\Microsoft\\Windows\\Application Experience\\Microsoft Compatibility Appraiser*','\\Microsoft\\Windows\\Application Experience\\ProgramDataUpdater','\\Microsoft\\Windows\\Application Experience\\MareBackup','\\Microsoft\\Windows\\Application Experience\\PcaPatchDbTask','\\Microsoft\\Windows\\Application Experience\\StartupAppTask','\\Microsoft\\Windows\\Customer Experience Improvement Program\\*','\\Microsoft\\Windows\\Autochk\\Proxy','\\Microsoft\\Windows\\DiskDiagnostic\\Microsoft-Windows-DiskDiagnosticDataCollector','\\Microsoft\\Windows\\Feedback\\Siuf\\*')\nTaskSet $T $true",
     "check": "$T=@('\\Microsoft\\Windows\\Application Experience\\Microsoft Compatibility Appraiser*','\\Microsoft\\Windows\\Application Experience\\ProgramDataUpdater','\\Microsoft\\Windows\\Application Experience\\MareBackup','\\Microsoft\\Windows\\Application Experience\\PcaPatchDbTask','\\Microsoft\\Windows\\Application Experience\\StartupAppTask','\\Microsoft\\Windows\\Customer Experience Improvement Program\\*','\\Microsoft\\Windows\\Autochk\\Proxy','\\Microsoft\\Windows\\DiskDiagnostic\\Microsoft-Windows-DiskDiagnosticDataCollector','\\Microsoft\\Windows\\Feedback\\Siuf\\*')\n$L=@()\n$c=@((TaskCheck $T) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Deshabilita estas tareas programadas: Microsoft Compatibility Appraiser, ProgramDataUpdater, MareBackup, PcaPatchDbTask y StartupAppTask (Application Experience), todas las de Customer Experience Improvement Program, AutochkProxy, DiskDiagnosticDataCollector y las de FeedbackSiuf.",
+   "source": null
   },
   {
    "id": "adid",
@@ -1874,7 +1998,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "AdvertisingInfo\\Enabled = 0, el mismo valor que Microsoft documenta para apagar el ID de publicidad.",
+   "source": "https://learn.microsoft.com/es-es/windows/privacy/manage-connections-from-windows-operating-system-components-to-microsoft-services"
   },
   {
    "id": "activity",
@@ -1917,7 +2043,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Directivas EnableActivityFeed, PublishUserActivities y UploadUserActivities en 0: Windows no guarda ni sube tu historial de actividad.",
+   "source": "https://learn.microsoft.com/es-es/windows/client-management/mdm/policy-csp-privacy"
   },
   {
    "id": "wer",
@@ -1952,7 +2080,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Windows Error Reporting\\Disabled = 1 y el servicio WerSvc deshabilitado.",
+   "source": "https://learn.microsoft.com/es-es/windows/win32/wer/wer-settings"
   },
   {
    "id": "tailored",
@@ -1987,7 +2117,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "NumberOfSIUFInPeriod = 0 (sin encuestas de Feedback) y TailoredExperiencesWithDiagnosticDataEnabled = 0 en tu usuario. La fuente documenta la misma función por directiva.",
+   "source": "https://learn.microsoft.com/es-es/windows/privacy/manage-connections-from-windows-operating-system-components-to-microsoft-services"
   },
   {
    "id": "copilot",
@@ -2030,7 +2162,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Directivas TurnOffWindowsCopilot = 1 y DisableAIDataAnalysis = 1 (no guarda capturas para Recall), y oculta el botón de Copilot de la barra de tareas.",
+   "source": "https://learn.microsoft.com/es-es/windows/client-management/mdm/policy-csp-windowsai"
   },
   {
    "id": "bing",
@@ -2065,7 +2199,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Directiva DisableSearchBoxSuggestions = 1 y BingSearchEnabled = 0: el buscador del Inicio no consulta Bing.",
+   "source": null
   },
   {
    "id": "cortana",
@@ -2092,7 +2228,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Directiva AllowCortana = 0.",
+   "source": "https://learn.microsoft.com/es-es/windows/client-management/mdm/policy-csp-experience"
   },
   {
    "id": "firefox",
@@ -2127,7 +2265,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Directivas de empresa de Firefox DisableTelemetry y DisableDefaultBrowserAgent en HKLM\\SOFTWARE\\Policies\\Mozilla\\Firefox. Firefox muestra \"Tu navegador está administrado por tu organización\".",
+   "source": "https://mozilla.github.io/policy-templates/"
   },
   {
    "id": "visualfx",
@@ -2187,7 +2327,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Efectos visuales en \"Personalizado\", con animaciones de ventanas, menús y barra de tareas apagadas (UserPreferencesMask, MinAnimate, TaskbarAnimations).",
+   "source": null
   },
   {
    "id": "transparency",
@@ -2214,7 +2356,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "EnableTransparency = 0, lo mismo que apagar \"Efectos de transparencia\" en Configuración > Personalización > Colores.",
+   "source": null
   },
   {
    "id": "menudelay",
@@ -2241,7 +2385,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "MenuShowDelay = 0 en HKCU\\Control Panel\\Desktop. Windows usa 400 ms.",
+   "source": null
   },
   {
    "id": "startupdelay",
@@ -2268,7 +2414,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "StartupDelayInMSec = 0 en Explorer\\Serialize: el Explorador lanza los programas de inicio sin esperar.",
+   "source": null
   },
   {
    "id": "shutdown",
@@ -2319,7 +2467,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "WaitToKillServiceTimeout = 2000 ms (cuánto espera Windows a que paren los servicios al reiniciar o apagar), y AutoEndTasks, HungAppTimeout y WaitToKillAppTimeout para las apps colgadas.",
+   "source": "https://learn.microsoft.com/es-es/windows/win32/services/service-control-handler-function"
   },
   {
    "id": "endtask",
@@ -2346,7 +2496,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "TaskbarEndTask = 1, lo mismo que \"Finalizar tarea\" en Configuración > Sistema > Avanzado.",
+   "source": "https://learn.microsoft.com/es-es/windows/advanced-settings/"
   },
   {
    "id": "fileext",
@@ -2373,13 +2525,15 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "HideFileExt = 0, lo mismo que \"Mostrar extensiones de archivo\" en el Explorador.",
+   "source": null
   },
   {
    "id": "ads",
    "cat": "qol",
    "name": "Quitar anuncios y sugerencias de Windows",
-   "desc": "Sin apps sugeridas en Inicio, sin tips en Configuración y sin instalaciones silenciosas de apps promocionadas.",
+   "desc": "Sin apps sugeridas ni recomendaciones en Inicio, sin tips en Configuración y sin instalaciones silenciosas de apps promocionadas.",
    "risk": "low",
    "reboot": false,
    "debloat": false,
@@ -2461,10 +2615,20 @@
      "t": "DWord",
      "def": null,
      "svc": false
+    },
+    {
+     "p": "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+     "n": "Start_IrisRecommendations",
+     "v": 0,
+     "t": "DWord",
+     "def": null,
+     "svc": false
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Apaga los SubscribedContent-*, SystemPaneSuggestions, SilentInstalledApps y SoftLanding de ContentDeliveryManager, ScoobeSystemSettingEnabled (la pantalla \"Terminemos de configurar tu dispositivo\" después de las actualizaciones) y Start_IrisRecommendations, el interruptor de recomendaciones del Inicio de Windows 11 que documenta la fuente.",
+   "source": "https://learn.microsoft.com/es-es/windows/apps/develop/settings/settings-windows-11"
   },
   {
    "id": "lockads",
@@ -2499,7 +2663,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "RotatingLockScreenOverlayEnabled y SubscribedContent-338387Enabled en 0: sin textos ni sugerencias sobre la imagen de la pantalla de bloqueo.",
+   "source": null
   },
   {
    "id": "classicmenu",
@@ -2521,7 +2687,9 @@
     "apply": "$L=@(); RegApply 'classicmenu' $L\nLog '› New-Item -Path ''HKCU:\\Software\\Classes\\CLSID\\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\\InprocServer32'' -Value '''' -Force | Out-Null' 'cmd'\nNew-Item -Path 'HKCU:\\Software\\Classes\\CLSID\\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\\InprocServer32' -Value '' -Force | Out-Null",
     "revert": "Log '› Remove-Item -LiteralPath ''HKCU:\\Software\\Classes\\CLSID\\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}'' -Recurse -Force -ErrorAction SilentlyContinue' 'cmd'\nRemove-Item -LiteralPath 'HKCU:\\Software\\Classes\\CLSID\\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}' -Recurse -Force -ErrorAction SilentlyContinue",
     "check": "\n$L=@()\n$c=@([bool](Test-Path -LiteralPath 'HKCU:\\Software\\Classes\\CLSID\\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\\InprocServer32') | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Crea una clave vacía en HKCU\\Software\\Classes\\CLSID\\{86ca1aa0-…}\\InprocServer32, que hace que el Explorador use el menú clásico. Revertir borra esa clave.",
+   "source": null
   },
   {
    "id": "widgets",
@@ -2543,7 +2711,9 @@
     "apply": "$L=@(); RegApply 'widgets' $L\nAppxRemove @('MicrosoftWindows.Client.WebExperience')",
     "revert": "AppxRestore @('MicrosoftWindows.Client.WebExperience')",
     "check": "\n$L=@()\n$c=@([bool](AppxCheck @('MicrosoftWindows.Client.WebExperience')) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Desinstala MicrosoftWindows.Client.WebExperience (Windows Web Experience Pack). Corre Remove-AppxPackage para tu usuario. No borra la copia que Windows guarda para usuarios nuevos, así que Revertir la puede reinstalar.",
+   "source": null
   },
   {
    "id": "verboseboot",
@@ -2570,7 +2740,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "VerboseStatus = 1 en Policies\\System, como documenta Microsoft. No se ven mensajes si DisableStatusMessages está en 1.",
+   "source": "https://learn.microsoft.com/es-es/troubleshoot/windows-server/performance/enable-verbose-startup-shutdown-logon-logoff-status-messages"
   },
   {
    "id": "noautoreboot",
@@ -2597,7 +2769,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Directiva NoAutoRebootWithLoggedOnUsers = 1: con alguien con sesión abierta, Windows Update no reinicia solo.",
+   "source": "https://learn.microsoft.com/es-es/windows/deployment/update/waas-restart"
   },
   {
    "id": "dbnews",
@@ -2619,7 +2793,9 @@
     "apply": "$L=@(); RegApply 'dbnews' $L\nAppxRemove @('Microsoft.BingNews','Microsoft.BingWeather')",
     "revert": "AppxRestore @('Microsoft.BingNews','Microsoft.BingWeather')",
     "check": "\n$L=@()\n$c=@([bool](AppxCheck @('Microsoft.BingNews','Microsoft.BingWeather')) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Corre Remove-AppxPackage para tu usuario. No borra la copia que Windows guarda para usuarios nuevos, así que Revertir la puede reinstalar.",
+   "source": null
   },
   {
    "id": "dbgames",
@@ -2641,7 +2817,9 @@
     "apply": "$L=@(); RegApply 'dbgames' $L\nAppxRemove @('Microsoft.MicrosoftSolitaireCollection','king.com.*','*CandyCrush*','Microsoft.ZuneVideo')",
     "revert": "AppxRestore @('Microsoft.MicrosoftSolitaireCollection','king.com.*','*CandyCrush*','Microsoft.ZuneVideo')",
     "check": "\n$L=@()\n$c=@([bool](AppxCheck @('Microsoft.MicrosoftSolitaireCollection','king.com.*','*CandyCrush*','Microsoft.ZuneVideo')) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Corre Remove-AppxPackage para tu usuario. No borra la copia que Windows guarda para usuarios nuevos, así que Revertir la puede reinstalar.",
+   "source": null
   },
   {
    "id": "dbphone",
@@ -2663,7 +2841,9 @@
     "apply": "$L=@(,@('HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\System','EnableMmx',0,'DWord',$null)); RegApply 'dbphone' $L\nAppxRemove @('Microsoft.YourPhone','Microsoft.Windows.PhoneLink')",
     "revert": "$L=@(,@('HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\System','EnableMmx',0,'DWord',$null)); RegRevert 'dbphone' $L\nAppxRestore @('Microsoft.YourPhone','Microsoft.Windows.PhoneLink')",
     "check": "\n$L=@(,@('HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\System','EnableMmx',0,'DWord',$null))\n$c=@((RegCheck $L), [bool](AppxCheck @('Microsoft.YourPhone','Microsoft.Windows.PhoneLink')) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Corre Remove-AppxPackage para tu usuario. No borra la copia que Windows guarda para usuarios nuevos, así que Revertir la puede reinstalar. Además pone la directiva EnableMmx = 0.",
+   "source": null
   },
   {
    "id": "dbcopilot",
@@ -2685,7 +2865,9 @@
     "apply": "$L=@(); RegApply 'dbcopilot' $L\nAppxRemove @('Microsoft.Copilot','Microsoft.Windows.Ai.Copilot.Provider')",
     "revert": "AppxRestore @('Microsoft.Copilot','Microsoft.Windows.Ai.Copilot.Provider')",
     "check": "\n$L=@()\n$c=@([bool](AppxCheck @('Microsoft.Copilot','Microsoft.Windows.Ai.Copilot.Provider')) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Corre Remove-AppxPackage para tu usuario. No borra la copia que Windows guarda para usuarios nuevos, así que Revertir la puede reinstalar.",
+   "source": null
   },
   {
    "id": "dbclipchamp",
@@ -2707,7 +2889,9 @@
     "apply": "$L=@(); RegApply 'dbclipchamp' $L\nAppxRemove @('Clipchamp.Clipchamp')",
     "revert": "AppxRestore @('Clipchamp.Clipchamp')",
     "check": "\n$L=@()\n$c=@([bool](AppxCheck @('Clipchamp.Clipchamp')) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Corre Remove-AppxPackage para tu usuario. No borra la copia que Windows guarda para usuarios nuevos, así que Revertir la puede reinstalar.",
+   "source": null
   },
   {
    "id": "dbteams",
@@ -2729,7 +2913,9 @@
     "apply": "$L=@(); RegApply 'dbteams' $L\nAppxRemove @('MSTeams','MicrosoftTeams','Microsoft.OutlookForWindows')",
     "revert": "AppxRestore @('MSTeams','MicrosoftTeams','Microsoft.OutlookForWindows')",
     "check": "\n$L=@()\n$c=@([bool](AppxCheck @('MSTeams','MicrosoftTeams','Microsoft.OutlookForWindows')) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Corre Remove-AppxPackage para tu usuario. No borra la copia que Windows guarda para usuarios nuevos, así que Revertir la puede reinstalar.",
+   "source": null
   },
   {
    "id": "dboffice",
@@ -2751,7 +2937,9 @@
     "apply": "$L=@(); RegApply 'dboffice' $L\nAppxRemove @('Microsoft.MicrosoftOfficeHub','Microsoft.Todos')",
     "revert": "AppxRestore @('Microsoft.MicrosoftOfficeHub','Microsoft.Todos')",
     "check": "\n$L=@()\n$c=@([bool](AppxCheck @('Microsoft.MicrosoftOfficeHub','Microsoft.Todos')) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Corre Remove-AppxPackage para tu usuario. No borra la copia que Windows guarda para usuarios nuevos, así que Revertir la puede reinstalar.",
+   "source": null
   },
   {
    "id": "dbhelp",
@@ -2773,7 +2961,9 @@
     "apply": "$L=@(); RegApply 'dbhelp' $L\nAppxRemove @('Microsoft.GetHelp','Microsoft.Getstarted','Microsoft.WindowsFeedbackHub')",
     "revert": "AppxRestore @('Microsoft.GetHelp','Microsoft.Getstarted','Microsoft.WindowsFeedbackHub')",
     "check": "\n$L=@()\n$c=@([bool](AppxCheck @('Microsoft.GetHelp','Microsoft.Getstarted','Microsoft.WindowsFeedbackHub')) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Corre Remove-AppxPackage para tu usuario. No borra la copia que Windows guarda para usuarios nuevos, así que Revertir la puede reinstalar.",
+   "source": null
   },
   {
    "id": "dbmaps",
@@ -2795,7 +2985,9 @@
     "apply": "$L=@(); RegApply 'dbmaps' $L\nAppxRemove @('Microsoft.WindowsMaps','Microsoft.People','Microsoft.549981C3F5F10','Microsoft.BingSearch')",
     "revert": "AppxRestore @('Microsoft.WindowsMaps','Microsoft.People','Microsoft.549981C3F5F10','Microsoft.BingSearch')",
     "check": "\n$L=@()\n$c=@([bool](AppxCheck @('Microsoft.WindowsMaps','Microsoft.People','Microsoft.549981C3F5F10','Microsoft.BingSearch')) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Corre Remove-AppxPackage para tu usuario. No borra la copia que Windows guarda para usuarios nuevos, así que Revertir la puede reinstalar.",
+   "source": null
   },
   {
    "id": "dbdev",
@@ -2817,7 +3009,9 @@
     "apply": "$L=@(); RegApply 'dbdev' $L\nAppxRemove @('Microsoft.Windows.DevHome','Microsoft.PowerAutomateDesktop','MicrosoftCorporationII.QuickAssist')",
     "revert": "AppxRestore @('Microsoft.Windows.DevHome','Microsoft.PowerAutomateDesktop','MicrosoftCorporationII.QuickAssist')",
     "check": "\n$L=@()\n$c=@([bool](AppxCheck @('Microsoft.Windows.DevHome','Microsoft.PowerAutomateDesktop','MicrosoftCorporationII.QuickAssist')) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Corre Remove-AppxPackage para tu usuario. No borra la copia que Windows guarda para usuarios nuevos, así que Revertir la puede reinstalar.",
+   "source": null
   },
   {
    "id": "dbxbox",
@@ -2839,7 +3033,9 @@
     "apply": "$L=@(); RegApply 'dbxbox' $L\nAppxRemove @('Microsoft.GamingApp','Microsoft.XboxApp','Microsoft.XboxSpeechToTextOverlay')",
     "revert": "AppxRestore @('Microsoft.GamingApp','Microsoft.XboxApp','Microsoft.XboxSpeechToTextOverlay')",
     "check": "\n$L=@()\n$c=@([bool](AppxCheck @('Microsoft.GamingApp','Microsoft.XboxApp','Microsoft.XboxSpeechToTextOverlay')) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Corre Remove-AppxPackage para tu usuario. No borra la copia que Windows guarda para usuarios nuevos, así que Revertir la puede reinstalar.",
+   "source": null
   },
   {
    "id": "onedrive",
@@ -2861,7 +3057,9 @@
     "apply": "$L=@(); RegApply 'onedrive' $L\nLog '› Get-Process OneDrive -ErrorAction SilentlyContinue | Stop-Process -Force; $u=@(\"$env:SystemRoot\\System32\\OneDriveSetup.exe\",\"$env:SystemRoot\\SysWOW64\\…' 'cmd'\nGet-Process OneDrive -ErrorAction SilentlyContinue | Stop-Process -Force; $u=@(\"$env:SystemRoot\\System32\\OneDriveSetup.exe\",\"$env:SystemRoot\\SysWOW64\\OneDriveSetup.exe\",\"$env:LOCALAPPDATA\\Microsoft\\OneDrive\\OneDriveSetup.exe\") | Where-Object { (Test-Path -LiteralPath $_) -and (MsSigned $_) } | Select-Object -First 1; if($u){ Start-Process $u '/uninstall' -Wait } else { & (WingetExe) uninstall --id Microsoft.OneDrive -e --silent | Out-Null }",
     "revert": "Log '› & (WingetExe) install --id Microsoft.OneDrive -e --silent --accept-source-agreements --accept-package-agreements | Out-Null' 'cmd'\n& (WingetExe) install --id Microsoft.OneDrive -e --silent --accept-source-agreements --accept-package-agreements | Out-Null",
     "check": "\n$L=@()\n$c=@([bool](-not (Test-Path \"$env:LOCALAPPDATA\\Microsoft\\OneDrive\\OneDrive.exe\") -and -not (Test-Path \"$env:ProgramFiles\\Microsoft OneDrive\\OneDrive.exe\")) | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }"
-   }
+   },
+   "details": "Corre OneDriveSetup.exe /uninstall. La carpeta OneDrive y tus archivos quedan donde estaban. Revertir lo reinstala con winget.",
+   "source": null
   },
   {
    "id": "edgebg",
@@ -2896,7 +3094,9 @@
     }
    ],
    "pwr": [],
-   "ps": null
+   "ps": null,
+   "details": "Directivas de Edge StartupBoostEnabled = 0 y BackgroundModeEnabled = 0.",
+   "source": "https://learn.microsoft.com/es-es/deployedge/microsoft-edge-policies/StartupBoostEnabled"
   }
  ],
  "boosts": [

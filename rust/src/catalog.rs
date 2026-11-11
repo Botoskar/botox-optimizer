@@ -42,7 +42,13 @@ pub struct Tweak {
     pub reg: Vec<RegEntry>,
     pub pwr: Vec<PwrEntry>,
     pub ps: Option<Ps>,
+    /// Detalle técnico (#9): qué hace por dentro. `source`: página oficial revisada a mano (ver INFO en tweaks.js).
+    #[serde(default)]
+    pub details: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
 }
+
 
 #[derive(Deserialize, Clone)]
 pub struct Boost { pub id: String, pub name: String, pub icon: String, pub every: String, pub desc: String, pub ps: String }
@@ -155,6 +161,23 @@ pub fn one_click_ids(cat: &Catalog, f: &Facts, state: &std::collections::HashMap
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sitios aceptados como fuente de un tweak: documentación oficial de Microsoft, de los fabricantes y de Mozilla/Cloudflare.
+    const SOURCE_HOSTS: [&str; 7] = ["learn.microsoft.com", "support.microsoft.com", "devblogs.microsoft.com", "blogs.windows.com", "nvidia.custhelp.com", "developers.cloudflare.com", "mozilla.github.io"];
+
+    /// Las fuentes se abren con el navegador: solo https y de los sitios oficiales de la lista.
+    #[test]
+    fn las_fuentes_son_https_de_sitios_oficiales() {
+        let cat = Catalog::load();
+        for t in &cat.tweaks {
+            assert!(t.details.as_deref().is_some_and(|d| !d.trim().is_empty()), "{} no tiene detalle", t.id);
+            if let Some(u) = &t.source {
+                let host = u.strip_prefix("https://").and_then(|r| r.split('/').next()).unwrap_or("");
+                assert!(SOURCE_HOSTS.contains(&host), "{}: fuente fuera de la lista: {u}", t.id);
+                assert!(!u.contains(['"', ' ', '\\']), "{}: URL rara: {u}", t.id);
+            }
+        }
+    }
 
     #[test]
     fn un_clic_elige_recomendadas_apagadas_de_bajo_riesgo() {

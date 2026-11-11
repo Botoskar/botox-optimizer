@@ -109,7 +109,14 @@ struct Saved {
     /// Posición y tamaño de la ventana [x, y, ancho, alto] para abrirla donde quedó.
     win: Option<[f32; 4]>,
     maximized: bool,
+    /// Tamaño de letra (#6): zoom de toda la interfaz, 1.0 a ZOOM_MAX. 0 (preferencias viejas) cuenta como 1.0.
+    zoom: f32,
 }
+
+const ZOOM_MAX: f32 = 1.3;
+/// Tamaño mínimo de la ventana en puntos de egui (a 100 %).
+const MIN_W: f32 = 1180.0;
+const MIN_H: f32 = 720.0;
 
 const SIDE_W: f32 = 196.0;
 
@@ -246,10 +253,11 @@ fn main() -> eframe::Result {
     }
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).expect("icono");
     let saved = load_saved();
+    let z = saved.zoom.clamp(1.0, ZOOM_MAX);
     let mut vp = egui::ViewportBuilder::default()
         .with_title(match sys::fake_kind().as_deref() { Some("amd") => "Botox Optimizer · PRUEBA: Radeon + Ryzen simulados", Some(_) => "Botox Optimizer · PRUEBA: Ryzen X3D simulado", None => "Botox Optimizer" })
         .with_inner_size([1340.0, 860.0])
-        .with_min_inner_size([1180.0, 720.0])
+        .with_min_inner_size([MIN_W * z, MIN_H * z])
         .with_icon(icon)
         .with_maximized(saved.maximized);
     // Abre donde quedó la última vez (si no estaba minimizada fuera de pantalla).
@@ -407,7 +415,14 @@ fn write_atomic(p: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&tmp, p)
 }
 
-fn load_saved() -> Saved { std::fs::read_to_string(saved_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default() }
+fn load_saved() -> Saved {
+    let mut s: Saved = std::fs::read_to_string(saved_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    // BX_ZOOM=1.3: capturas con la letra grande, sin tocar las preferencias.
+    if let Some(z) = win::test_env("BX_ZOOM").and_then(|z| z.parse().ok()) {
+        s.zoom = z;
+    }
+    s
+}
 
 pub fn unix_now() -> u64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) }
 
@@ -421,6 +436,7 @@ impl App {
         let (tx, rx) = channel();
         let (log_tx, log_rx) = channel();
         let saved = load_saved();
+        cc.egui_ctx.set_zoom_factor(saved.zoom.clamp(1.0, ZOOM_MAX));
         let mut app = Self {
             cat: Arc::new(Catalog::load()),
             page: match win::test_env("BX_PAGE").as_deref() { Some("scan") => Page::Scan, Some("tweaks") => Page::Tweaks, Some("fix") => Page::Fix,Some("debloat") => Page::Debloat, Some("boost") => Page::Boost, Some("backup") => Page::Backup, Some("startup") => Page::Startup, _ => Page::Home },
@@ -1007,7 +1023,7 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
         if hit.clicked() {
             ui.memory_mut(|m| m.toggle_popup(menu));
         }
-        let hit = if ui.memory(|m| m.is_popup_open(menu)) { hit } else { hit.on_hover_text("Cambiar imagen") };
+        let hit = if ui.memory(|m| m.is_popup_open(menu)) { hit } else { hit.on_hover_text("Imagen y tamaño de letra") };
         let mut pick = None;
         egui::popup::popup_below_widget(ui, menu, &hit, egui::PopupCloseBehavior::CloseOnClick, |ui| {
             ui.set_min_width(230.0);
@@ -1021,6 +1037,16 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
             if self.avatar.is_some() && item(ui, ic::ARROW_COUNTER_CLOCKWISE, "Volver a la original") {
                 pick = Some(3);
             }
+            ui.separator();
+            ui.label(RichText::new("Tamaño de letra").size(12.5).color(MUTED));
+            ui.horizontal(|ui| {
+                for (z, t) in [(1.0, "100 %"), (1.15, "115 %"), (ZOOM_MAX, "130 %")] {
+                    let on = (ui.ctx().zoom_factor() - z).abs() < 0.01;
+                    if ui.add(egui::Button::new(RichText::new(t).size(13.0).color(if on { ACCENT } else { TEXT })).selected(on)).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        ui.ctx().set_zoom_factor(z);
+                    }
+                }
+            });
         });
         let ctx = ui.ctx().clone();
         match pick {
@@ -1236,36 +1262,53 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
                 self.actions.push(a);
             }
         }
-        // "Qué cambia" de un tweak (#9): solo lo que dice el catálogo, sin textos ni fuentes inventados.
+        // "Qué cambia" de un tweak (#9): lo que dice el catálogo; la fuente es una página oficial revisada a mano (INFO en tweaks.js).
         if let Some(t) = self.detail.as_ref().and_then(|id| self.cat.tweak(id)).cloned() {
             let mut close = false;
             egui::Modal::new(egui::Id::new("detail")).frame(panel()).show(ctx, |ui| {
                 ui.set_width(620.0);
                 ui.add(egui::Label::new(RichText::new(&t.name).font(semi(17.0))).wrap());
-                ui.add(egui::Label::new(RichText::new(&t.desc).size(14.0).color(Color32::from_rgb(200, 208, 226))).wrap());
-                let mut facts = vec![self.cat.cat_name(&t.cat).to_string(), if t.risk == "low" { "Riesgo bajo".into() } else { "Riesgo medio".into() }];
-                if t.reboot {
-                    facts.push("Necesita reiniciar".into());
-                }
-                ui.label(RichText::new(facts.join(" · ")).size(12.5).color(MUTED));
-                ui.add_space(4.0);
-                ui.label(RichText::new("Qué cambia").font(semi(14.0)));
                 let changes = t.changes();
-                for c in &changes {
-                    ui.add(egui::Label::new(RichText::new(format!("• {c}")).font(mono(12.5))).wrap());
-                }
-                if let Some(ps) = &t.ps {
-                    egui::Frame::new().fill(CARD).stroke(egui::Stroke::new(1.0_f32, LINE)).corner_radius(10).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
-                        egui::ScrollArea::vertical().max_height(220.0).auto_shrink([false, true]).show(ui, |ui| {
-                            ui.add(egui::Label::new(RichText::new(&ps.apply).font(mono(11.5)).color(MUTED)).wrap());
+                // Con letra grande o mucho detalle no entra en la pantalla: el cuerpo se desplaza y los botones quedan fijos.
+                let room = (ui.ctx().screen_rect().height() - 190.0).max(200.0);
+                egui::ScrollArea::vertical().max_height(room).auto_shrink([false, true]).show(ui, |ui| {
+                    ui.add(egui::Label::new(RichText::new(&t.desc).size(14.0).color(Color32::from_rgb(200, 208, 226))).wrap());
+                    let mut facts = vec![self.cat.cat_name(&t.cat).to_string(), if t.risk == "low" { "Riesgo bajo".into() } else { "Riesgo medio".into() }];
+                    if t.reboot {
+                        facts.push("Necesita reiniciar".into());
+                    }
+                    ui.label(RichText::new(facts.join(" · ")).size(12.5).color(MUTED));
+                    if let Some(d) = &t.details {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("Cómo funciona").font(semi(14.0)));
+                        ui.add(egui::Label::new(RichText::new(d).size(13.5)).wrap());
+                    }
+                    if let Some(u) = &t.source {
+                        let link = egui::Button::new(RichText::new(format!("{}  Fuente oficial", ic::ARROW_SQUARE_OUT)).size(13.0).color(ACCENT)).frame(false);
+                        if ui.add(link).on_hover_text(u).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                            crate::win::open_url(u);
+                        }
+                    }
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("Qué cambia").font(semi(14.0)));
+                    for c in &changes {
+                        ui.add(egui::Label::new(RichText::new(format!("• {c}")).font(mono(12.5))).wrap());
+                    }
+                    if let Some(ps) = &t.ps {
+                        egui::Frame::new().fill(CARD).stroke(egui::Stroke::new(1.0_f32, LINE)).corner_radius(10).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+                            egui::ScrollArea::vertical().id_salt("script").max_height(220.0).auto_shrink([false, true]).show(ui, |ui| {
+                                ui.add(egui::Label::new(RichText::new(&ps.apply).font(mono(11.5)).color(MUTED)).wrap());
+                            });
                         });
-                    });
-                }
+                    }
+                });
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if button(ui, "Copiar detalle", Btn::Primary).clicked() {
                         let script = t.ps.as_ref().map_or(String::new(), |ps| format!("\n\nScript:\n{}", ps.apply));
-                        ui.ctx().copy_text(format!("{}\n{}\n\nQué cambia:\n- {}{script}", t.name, t.desc, changes.join("\n- ")));
+                        let how = t.details.as_ref().map_or(String::new(), |d| format!("\n\nCómo funciona:\n{d}"));
+                        let src = t.source.as_ref().map_or(String::new(), |u| format!("\nFuente: {u}"));
+                        ui.ctx().copy_text(format!("{}\n{}{how}{src}\n\nQué cambia:\n- {}{script}", t.name, t.desc, changes.join("\n- ")));
                         self.toasts.push(Toast { msg: "Detalle copiado.".into(), color: GREEN, at: Instant::now(), secs: 3.0, undo: None });
                     }
                     if button(ui, "Cerrar", Btn::Ghost).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -1438,8 +1481,18 @@ impl eframe::App for App {
         if let (Some(o), Some(inn), Some(max), Some(false)) = vp {
             self.saved.maximized = max;
             if !max {
-                self.saved.win = Some([o.min.x, o.min.y, inn.width(), inn.height()]);
+                // egui da la ventana en puntos con zoom; se guarda sin zoom, como la espera el arranque.
+                let z = ctx.zoom_factor();
+                self.saved.win = Some([o.min.x * z, o.min.y * z, inn.width() * z, inn.height() * z]);
             }
+        }
+        // Tamaño de letra: Ctrl+más/menos de egui también lo cambia, pero dentro del rango.
+        let z = ctx.zoom_factor();
+        if !(1.0..=ZOOM_MAX).contains(&z) {
+            ctx.set_zoom_factor(z.clamp(1.0, ZOOM_MAX));
+        } else if (z - self.saved.zoom).abs() > 0.001 {
+            self.saved.zoom = z;
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(Vec2::new(MIN_W, MIN_H))); // en puntos: crece con el zoom
         }
         egui::SidePanel::left("nav").exact_width(SIDE_W).resizable(false).show_separator_line(false).frame(egui::Frame::new().fill(SIDE)).show(ctx, |ui| {
             ui.spacing_mut().item_spacing = Vec2::new(0.0, 4.0);
