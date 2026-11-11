@@ -390,6 +390,12 @@ extern "system" {
 
 fn wide(s: &str) -> Vec<u16> { s.encode_utf16().chain([0]).collect() }
 
+/// Abre una página en el navegador del usuario. Por el Explorador y no con `cmd /c start`: cmd parte las URL con `&`,
+/// y desde la app elevada el Explorador la pasa al shell del usuario en vez de abrir un navegador elevado.
+pub fn open_url(url: &str) {
+    let _ = secure_command(windows_dir().join("explorer.exe")).arg(url).spawn();
+}
+
 /// Ventana de aviso de Windows (para los modos sin interfaz: el .exe de release no tiene consola).
 pub fn message(text: &str, error: bool) {
     // 0x10 = MB_ICONERROR, 0x40 = MB_ICONINFORMATION

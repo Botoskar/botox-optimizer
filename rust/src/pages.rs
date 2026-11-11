@@ -631,6 +631,26 @@ impl App {
                     });
                 });
             }
+            // Driver de video: no se compara con "la última" (no hay una fuente oficial y estable para eso); se
+            // muestra el instalado y un acceso a la página oficial del fabricante.
+            if let Some(url) = crate::diag::driver_url(&f.gpu_vendor) {
+                ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top() - 4.0, Stroke::new(1.0_f32, LINE));
+                let g = sys::main_gpu(&spec);
+                ui.horizontal(|ui| {
+                    let (dot, _) = ui.allocate_exact_size(Vec2::new(12.0, 20.0), Sense::hover());
+                    ui.painter().text(dot.center(), Align2::CENTER_CENTER, ic::GRAPHICS_CARD, regular(15.0), BLUE);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if button(ui, &format!("{}  Buscar driver de {}", ic::ARROW_SQUARE_OUT, f.gpu_vendor), Btn::Ghost).on_hover_text(url).clicked() {
+                            crate::win::open_url(url);
+                        }
+                        ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            ui.label(RichText::new(format!("Driver de video: {}", s(&g["driver"]))).font(semi(14.0)));
+                            ui.add(Label::new(muted("Un driver al día suele dar más FPS y menos errores. Compará tu versión con la última en la página oficial y bajala de ahí.")).wrap());
+                        });
+                    });
+                });
+            }
         });
         ui.add_space(8.0);
 

@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod catalog;
+mod diag;
 mod engine;
 mod hwscan;
 mod pages;
@@ -1047,9 +1048,11 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
                 if small(ui, "Limpiar").clicked() {
                     self.lines.clear();
                 }
-                if small(ui, "Copiar").clicked() {
-                    ui.ctx().copy_text(self.lines.iter().map(|l| format!("{} {}{}", l.t, plain(&l.lvl), l.msg)).collect::<Vec<_>>().join("\n"));
-                    self.toast("Registro copiado al portapapeles", GREEN, 3.0);
+                if small(ui, "Copiar diagnóstico").on_hover_text("Copia el registro con la versión, Windows y el hardware, listo para pegar en Discord o GitHub. Sin tu usuario ni el nombre de la PC. No se envía nada: solo va al portapapeles.").clicked() {
+                    let lines: Vec<String> = self.lines.iter().map(|l| format!("{} {}{}", l.t, plain(&l.lvl), l.msg)).collect();
+                    let report = diag::report(self.spec.as_ref(), self.admin, self.fake.as_deref(), &lines, &win::user_profile().display().to_string(), &std::env::var("COMPUTERNAME").unwrap_or_default());
+                    ui.ctx().copy_text(report);
+                    self.toast("Diagnóstico copiado al portapapeles", GREEN, 3.0);
                 }
                 if self.running > 0 && small(ui, "Cancelar").on_hover_text("Detener lo que está en curso").clicked() {
                     self.actions.push(Action::Cancel);
