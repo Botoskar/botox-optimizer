@@ -116,6 +116,26 @@ pub fn why(src: &str, f: &Facts) -> String {
 }
 
 impl Tweak {
+    /// Qué toca en Windows, en palabras, sacado del propio catálogo (#9). Los que usan PowerShell muestran su script.
+    pub fn changes(&self) -> Vec<String> {
+        let val = |v: &Value| match v {
+            Value::Null => "no existe".to_string(),
+            Value::String(s) => format!("\"{s}\""),
+            Value::Array(a) => format!("binario de {} bytes", a.len()),
+            v => v.to_string(),
+        };
+        let start = |v: &Value| match v.as_i64() { Some(2) => "Automático", Some(3) => "Manual", Some(4) => "Deshabilitado", _ => "otro" };
+        let mut out: Vec<String> = self.reg.iter().map(|e| if e.svc {
+            format!("Servicio {}: arranque {} (Windows: {})", e.p.rsplit('\\').next().unwrap_or(&e.p), start(&e.v), start(&e.def))
+        } else {
+            format!("{}\\{} = {} (Windows: {})", e.p.replacen(':', "", 1), e.n, val(&e.v), val(&e.def))
+        }).collect();
+        out.extend(self.pwr.iter().map(|x| format!("Plan de energía{}, ajuste {}: {} (Windows: {})", if self.ac { " (enchufada)" } else { "" }, x.set, x.v, x.def)));
+        if self.ps.is_some() {
+            out.push("Corre un script de PowerShell: es el que se ve abajo.".into());
+        }
+        out
+    }
     pub fn applies(&self, f: &Facts) -> bool { !f.na.contains(&self.id) && self.needs.as_deref().map_or(true, |s| cond(s, f)) }
     pub fn recommended(&self, f: &Facts) -> bool { self.applies(f) && self.rec.as_deref().map_or(false, |s| cond(s, f)) }
     pub fn reason(&self, f: &Facts) -> String { self.why.as_deref().map(|s| why(s, f)).unwrap_or_default() }
@@ -166,6 +186,19 @@ mod tests {
         let na = Facts { na: [low[0].clone()].into(), ..f.clone() };
         assert!(!one_click_ids(&c, &na, &all_off, true).contains(&low[0]));
         assert!(!c.tweak(&low[0]).unwrap().applies(&na));
+    }
+
+    #[test]
+    fn que_cambia_se_lee_del_catalogo() {
+        let c = Catalog::load();
+        for t in &c.tweaks {
+            assert!(!t.changes().is_empty(), "{} no dice qué cambia", t.id);
+        }
+        let reg = |p: &str, n: &str, v: Value, def: Value, svc: bool| RegEntry { p: p.into(), n: n.into(), v, t: "DWord".into(), def, svc };
+        let mut t = c.tweaks.iter().find(|t| t.native).unwrap().clone();
+        t.pwr.clear();
+        t.reg = vec![reg("HKLM:\\SOFTWARE\\X", "Val", 1.into(), Value::Null, false), reg("HKLM:\\SYSTEM\\CurrentControlSet\\Services\\DiagTrack", "Start", 4.into(), 2.into(), true)];
+        assert_eq!(t.changes(), vec!["HKLM\\SOFTWARE\\X\\Val = 1 (Windows: no existe)", "Servicio DiagTrack: arranque Deshabilitado (Windows: Automático)"]);
     }
 
     #[test]

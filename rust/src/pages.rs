@@ -1,7 +1,8 @@
 //! Las pantallas: Inicio, Optimizaciones, Debloat, Escáner, Boost-Up y Backups.
 use crate::catalog::Tweak;
 use crate::theme::*;
-use crate::{sys, unix_now, Action, App, Page};
+use crate::{engine, sys, unix_now, Action, App, Msg, Page};
+use std::time::Instant;
 use eframe::egui::{self, Align, Align2, Color32, Label, Layout, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2};
 use egui_phosphor::regular as ic;
 use serde_json::Value;
@@ -241,8 +242,35 @@ impl App {
     fn switch(&mut self, ui: &mut Ui, t: &Tweak) {
         let busy = self.busy.contains(&t.id) || !self.state.contains_key(&t.id);
         let tip = if self.on(&t.id) { "Revertir" } else { "Activar" };
-        if toggle(ui, &t.id, self.on(&t.id), busy, t.applies(&self.facts)).on_hover_text(tip).clicked() {
+        let r = toggle(ui, &t.id, self.on(&t.id), busy, t.applies(&self.facts)).on_hover_text(tip);
+        if r.clicked() {
             self.actions.push(Action::Toggle(t.id.clone()));
+        }
+        if r.hovered() && !busy {
+            self.recheck(&t.id);
+        }
+    }
+
+    /// Re-lee el estado real de un tweak de fondo, con los límites de `should_recheck` (#10).
+    fn recheck(&mut self, id: &str) {
+        if !crate::should_recheck(self.states_at.map(|t| t.elapsed()), self.rechecked.get(id).map(|t| t.elapsed()), self.rechecking) {
+            return;
+        }
+        self.rechecking = true;
+        self.rechecked.insert(id.to_string(), Instant::now());
+        let id = id.to_string();
+        self.spawn(move |tx, _, cat| {
+            let st = cat.tweak(&id).and_then(|t| engine::check(&cat, t));
+            let _ = tx.send(Msg::Rechecked(id, st));
+        });
+    }
+
+    /// Nombre de un tweak: al hacer clic abre "Qué cambia" (#9).
+    fn tweak_name(&mut self, ui: &mut Ui, t: &Tweak, text: RichText, wrap: bool) {
+        let l = Label::new(text).sense(Sense::click());
+        let r = ui.add(if wrap { l.wrap() } else { l.truncate() }).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Ver qué cambia");
+        if r.clicked() {
+            self.detail = Some(t.id.clone());
         }
     }
 
@@ -255,7 +283,7 @@ impl App {
                 self.switch(ui, t);
                 ui.with_layout(Layout::top_down(Align::Min), |ui| {
                     ui.spacing_mut().item_spacing.y = 1.0;
-                    ui.add(Label::new(RichText::new(&t.name).font(semi(14.0))).truncate());
+                    self.tweak_name(ui, t, RichText::new(&t.name).font(semi(14.0)), false);
                     ui.add(Label::new(RichText::new(&t.desc).size(12.5).color(MUTED)).truncate());
                     if !why.is_empty() {
                         ui.label(RichText::new(&why).size(12.0).color(ACCENT2));
@@ -571,7 +599,7 @@ impl App {
         body.set_clip_rect(body_rect.intersect(ui.clip_rect()));
         body.spacing_mut().item_spacing.y = 6.0;
         badge(&mut body, self.cat.cat_name(&t.cat), MUTED, CHIP_BG);
-        body.add(Label::new(RichText::new(&t.name).font(semi(16.0))).wrap());
+        self.tweak_name(&mut body, t, RichText::new(&t.name).font(semi(16.0)), true);
         body.add(Label::new(RichText::new(&t.desc).size(13.0).color(MUTED)).wrap());
         let why = t.reason(&self.facts);
         if !ok {
