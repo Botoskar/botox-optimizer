@@ -76,6 +76,8 @@ pub struct Facts {
     pub amd_rdna2: bool,
     /// Ryzen X3D de doble chiplet (7900X3D, 7950X3D, 9900X3D, 9950X3D): su driver depende del estacionamiento de núcleos.
     pub x3d_dual: bool,
+    /// Tweaks que en esta PC no tienen nada que cambiar (lo dice el chequeo, no el hardware).
+    pub na: std::collections::HashSet<String>,
 }
 
 /// Evalúa una condición del catálogo. Son las funciones JS del catálogo original, portadas una por una.
@@ -114,7 +116,7 @@ pub fn why(src: &str, f: &Facts) -> String {
 }
 
 impl Tweak {
-    pub fn applies(&self, f: &Facts) -> bool { self.needs.as_deref().map_or(true, |s| cond(s, f)) }
+    pub fn applies(&self, f: &Facts) -> bool { !f.na.contains(&self.id) && self.needs.as_deref().map_or(true, |s| cond(s, f)) }
     pub fn recommended(&self, f: &Facts) -> bool { self.applies(f) && self.rec.as_deref().map_or(false, |s| cond(s, f)) }
     pub fn reason(&self, f: &Facts) -> String { self.why.as_deref().map(|s| why(s, f)).unwrap_or_default() }
 }
@@ -160,6 +162,10 @@ mod tests {
         let lap = Facts { laptop: true, ..f.clone() };
         let lap_ids = one_click_ids(&c, &lap, &all_off, false);
         assert!(c.tweaks.iter().filter(|t| t.cat == "laptop" && t.risk == "low" && t.recommended(&lap)).all(|t| lap_ids.contains(&t.id)));
+        // Lo que el chequeo marcó como "no aplica en esta PC" no se ofrece aunque figure apagado.
+        let na = Facts { na: [low[0].clone()].into(), ..f.clone() };
+        assert!(!one_click_ids(&c, &na, &all_off, true).contains(&low[0]));
+        assert!(!c.tweak(&low[0]).unwrap().applies(&na));
     }
 
     #[test]

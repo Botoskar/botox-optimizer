@@ -406,17 +406,22 @@ pub fn cancel_all() {
 
 // ── Operaciones que usa la interfaz ──
 
-pub fn check(cat: &Catalog, t: &Tweak) -> bool {
+/// Estado real del tweak. `None`: en esta PC no hay nada que revisar (ni tareas, ni servicios, ni opciones de la placa).
+pub fn check(cat: &Catalog, t: &Tweak) -> Option<bool> {
     match &t.ps {
-        None => check_native(t),
-        Some(ps) => run_ps_with(&cat.prelude, &ps.check, &Log(None), T_CHECK, &[]).out.trim_end().ends_with("True"),
+        None => Some(check_native(t)),
+        Some(ps) => {
+            let out = run_ps_with(&cat.prelude, &ps.check, &Log(None), T_CHECK, &[]).out;
+            if out.trim_end().ends_with("na") { None } else { Some(out.trim_end().ends_with("True")) }
+        }
     }
 }
 
 /// Estado de todos los tweaks que usan PowerShell.
 /// Corren en 4 procesos a la vez, agrupados por lo que consultan (apps, tareas, red, resto):
 /// cada grupo carga su parte lenta de Windows una sola vez y el total tarda lo que el grupo más lento.
-pub fn check_all_ps(cat: &Catalog) -> HashMap<String, bool> {
+/// Además del estado devuelve los que no aplican en esta PC (su estado queda en `false`).
+pub fn check_all_ps(cat: &Catalog) -> (HashMap<String, bool>, HashSet<String>) {
     let group = |check: &str| {
         if check.contains("AppxCheck") { 0 } else if check.contains("TaskCheck") { 1 } else if check.contains("Nic") { 2 } else { 3 }
     };
@@ -433,16 +438,18 @@ pub fn check_all_ps(cat: &Catalog) -> HashMap<String, bool> {
                     let out = run_ps_with(&cat.prelude, &format!("{script}$r | ConvertTo-Json -Compress"), &Log(None), T_CHECK, &[]).out;
                     // Un chequeo que devuelve algo raro (lista, vacío) cuenta como "no aplicado" en vez de tirar todo el grupo.
                     let map: HashMap<String, serde_json::Value> = out.find('{').and_then(|i| serde_json::from_str(&out[i..]).ok()).unwrap_or_default();
-                    map.into_iter().map(|(k, v)| (k, v.as_bool().unwrap_or(false))).collect::<HashMap<_, _>>()
+                    map
                 })
             })
             .collect();
-        let mut all: HashMap<String, bool> = jobs.into_iter().flat_map(|j| j.join().unwrap_or_default()).collect();
+        let raw: HashMap<String, serde_json::Value> = jobs.into_iter().flat_map(|j| j.join().unwrap_or_default()).collect();
+        let na: HashSet<String> = raw.iter().filter(|(_, v)| v.as_str() == Some("na")).map(|(k, _)| k.clone()).collect();
+        let mut all: HashMap<String, bool> = raw.into_iter().map(|(k, v)| (k, v.as_bool().unwrap_or(false))).collect();
         // Si un grupo entero falló, sus tweaks igual reciben estado: sin estado, el interruptor queda "cargando" y no se puede tocar.
         for t in cat.tweaks.iter().filter(|t| !t.native) {
             all.entry(t.id.clone()).or_insert(false);
         }
-        all
+        (all, na)
     })
 }
 
@@ -486,7 +493,8 @@ pub fn refresh_shell() {
 
 fn secs(t0: Instant) -> String { format!("{:.1}", t0.elapsed().as_secs_f32()).replace('.', ",") }
 
-pub struct Done { pub ok: bool, pub state: bool, pub err: String }
+/// `na`: se ejecutó, pero en esta PC no había nada que cambiar.
+pub struct Done { pub ok: bool, pub state: bool, pub err: String, pub na: bool }
 
 /// Aplica (on) o revierte un tweak y verifica el estado real. Deja todo registrado en la consola.
 pub fn toggle(cat: &Catalog, t: &Tweak, on: bool, log: &Log) -> Done {
@@ -504,16 +512,18 @@ pub fn toggle(cat: &Catalog, t: &Tweak, on: bool, log: &Log) -> Done {
         log.put("info", "Avisé a Windows y al Explorador para que tomen el cambio sin reiniciar");
     }
     log.put("info", "Verificando el estado real en Windows…");
-    let state = check(cat, t);
+    let checked = check(cat, t);
+    let (state, na) = (checked == Some(true), checked.is_none());
     match &res {
         Err(e) => log.put("enderr", format!("Error: {e} ({} s)", secs(t0))),
+        Ok(()) if na => log.put("endok", format!("Listo en {} s · en esta PC no hay nada que cambiar: no aplica", secs(t0))),
         Ok(()) if state == on => {
             let reboot = if on && t.reboot { " · reiniciá para que tome efecto" } else { "" };
             log.put("endok", format!("Listo en {} s · verificado: {}{reboot}", secs(t0), if on { "activo" } else { "revertido" }));
         }
         Ok(()) => log.put("endwarn", format!("Listo en {} s · Windows todavía no refleja el cambio (puede requerir reinicio)", secs(t0))),
     }
-    Done { ok: res.is_ok(), state, err: res.err().unwrap_or_default() }
+    Done { ok: res.is_ok(), state, err: res.err().unwrap_or_default(), na }
 }
 
 /// Corre una limpieza de Boost-Up. Devuelve (ok, resultado, error).

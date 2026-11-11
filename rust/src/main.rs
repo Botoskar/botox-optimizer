@@ -41,7 +41,8 @@ const NAV: [(Page, &str, &str); 7] = [
 pub enum Msg {
     Scan(Result<Value, String>),
     /// Estados de tweaks. `ps` = es la tanda de PowerShell (la lenta).
-    States { map: HashMap<String, bool>, ps: bool },
+    /// `na`: los que no aplican en esta PC (solo los trae la tanda de PowerShell).
+    States { map: HashMap<String, bool>, ps: bool, na: HashSet<String> },
     Toggled { id: String, on: bool, done: engine::Done, quiet: bool },
     Boosted { id: String, ok: bool, out: String, err: String },
     Restore(Result<Vec<(String, String)>, String>),
@@ -183,7 +184,7 @@ fn main() -> eframe::Result {
         let t0 = Instant::now();
         let mut all = engine::check_all_native(&cat);
         let native_ms = t0.elapsed().as_millis();
-        all.extend(engine::check_all_ps(&cat));
+        all.extend(engine::check_all_ps(&cat).0);
         eprintln!("nativos: {native_ms} ms · total: {} ms · admin: {}", t0.elapsed().as_millis(), engine::is_admin());
         let sorted: std::collections::BTreeMap<_, _> = all.into_iter().collect();
         println!("{}", serde_json::to_string(&sorted).unwrap());
@@ -286,7 +287,7 @@ fn revert_all_cli(yes: bool) -> (bool, String) {
     }
     let cat = Catalog::load();
     let mut state = engine::check_all_native(&cat);
-    state.extend(engine::check_all_ps(&cat));
+    state.extend(engine::check_all_ps(&cat).0);
     let mut saved = load_saved();
     let ids = reversible_ids(&cat, &|id| state.get(id) == Some(&true), &engine::backups(), &saved.applied);
     if ids.is_empty() {
@@ -481,8 +482,8 @@ impl App {
         self.scan_err = None;
         self.ps_ready = false;
         self.spawn(|tx, _, cat| { let _ = tx.send(Msg::Scan(sys::scan(&cat))); });
-        self.spawn(|tx, _, cat| { let _ = tx.send(Msg::States { map: engine::check_all_native(&cat), ps: false }); });
-        self.spawn(|tx, _, cat| { let _ = tx.send(Msg::States { map: engine::check_all_ps(&cat), ps: true }); });
+        self.spawn(|tx, _, cat| { let _ = tx.send(Msg::States { map: engine::check_all_native(&cat), ps: false, na: HashSet::new() }); });
+        self.spawn(|tx, _, cat| { let _ = tx.send({ let (map, na) = engine::check_all_ps(&cat); Msg::States { map, ps: true, na } }); });
     }
 
     fn save(&self) {
@@ -648,8 +649,8 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
             Action::Verify if self.verifying || !self.ps_ready => {}
             Action::Verify => {
                 self.verifying = true;
-                self.spawn(|tx, _, cat| { let _ = tx.send(Msg::States { map: engine::check_all_native(&cat), ps: false }); });
-                self.spawn(|tx, _, cat| { let _ = tx.send(Msg::States { map: engine::check_all_ps(&cat), ps: true }); });
+                self.spawn(|tx, _, cat| { let _ = tx.send(Msg::States { map: engine::check_all_native(&cat), ps: false, na: HashSet::new() }); });
+                self.spawn(|tx, _, cat| { let _ = tx.send({ let (map, na) = engine::check_all_ps(&cat); Msg::States { map, ps: true, na } }); });
             }
             Action::Cancel => {
                 engine::cancel_all();
@@ -714,16 +715,19 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
     fn handle(&mut self, m: Msg) {
         match m {
             Msg::Scan(Ok(spec)) => {
+                let na = std::mem::take(&mut self.facts.na);
                 self.facts = sys::facts(&spec);
+                self.facts.na = na;
                 self.saved.spec = Some(spec.clone());
                 self.spec = Some(spec);
                 self.save();
             }
             Msg::Scan(Err(e)) => self.scan_err = Some(e),
-            Msg::States { map, ps } => {
+            Msg::States { map, ps, na } => {
                 self.state.extend(map);
                 self.ps_ready |= ps;
                 if ps {
+                    self.facts.na = na;
                     self.states_at = Some(Instant::now());
                     self.verifying = false;
                 }
@@ -746,8 +750,13 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
                     b.1 += done.ok as usize;
                     b.2 |= t.reboot;
                 }
+                if done.na {
+                    self.facts.na.insert(id.clone());
+                }
                 if !done.ok {
                     self.toast(format!("{}: {}", t.name, done.err), RED, 8.0);
+                } else if done.na {
+                    self.toast(format!("{}: en esta PC no hay nada que cambiar, así que no aplica.", t.name), ACCENT, 6.0);
                 } else if done.state != on {
                     self.toast(format!("{}: se ejecutó pero Windows no refleja el cambio todavía (puede requerir reinicio).", t.name), ACCENT, 7.0);
                 } else if !quiet {

@@ -119,7 +119,8 @@ function RegRevert($id, $L) {
 function RegCheck($L) {
   $n = 0
   foreach ($x in $L) { if (!(Skip $x)) { $n++; $c = Get-RegVal $x[0] $x[1]; if (!$c.e -or "$($c.v)" -ne "$($x[2])") { return $false } } }
-  $n -gt 0
+  # Sin nada que revisar (servicios que no existen, lista vacía): $null = "no aplica en esta PC", no "apagado".
+  if ($n) { $true }
 }
 
 # Planes de energía: lee el valor AC actual de un ajuste (independiente del idioma).
@@ -177,7 +178,7 @@ function TaskSet($pats, $on) {
     try { if ($on) { $t | Enable-ScheduledTask | Out-Null; Log "Tarea $($n): habilitada" } else { $t | Disable-ScheduledTask | Out-Null; Log "Tarea $($n): deshabilitada" } }
     catch { Log "Tarea $($n): protegida por Windows, se saltea" 'warn' } }
 }
-function TaskCheck($pats) { $f = @(FindTasks $pats); $f.Count -gt 0 -and @($f | Where-Object { $_.State -ne 'Disabled' }).Count -eq 0 }
+function TaskCheck($pats) { $f = @(FindTasks $pats); if ($f.Count) { @($f | Where-Object { $_.State -ne 'Disabled' }).Count -eq 0 } }
 function Apps { if ($null -eq $script:APPS) { $script:APPS = @(Get-AppxPackage) }; $script:APPS }
 function AppxFind($pats) { Apps | Where-Object { $n = $_.Name; @($pats | Where-Object { $n -like $_ }).Count -gt 0 } }
 function AppxRemove($pats) {
@@ -224,8 +225,8 @@ function NicRevert($id, $kv) {
   if ($fail) { throw "$fail propiedades de red no se pudieron restaurar; el respaldo se conserva para reintentar" }
   Remove-Bk "$id-nic"
 }
-# Cada driver expone distintas propiedades: solo se exige que las que existen tengan el valor buscado.
-function NicCheck($kv) { $p = @(NicProps $kv); $p.Count -gt 0 -and @($p | Where-Object { $_.v -ne [string]$kv[$_.k] }).Count -eq 0 }
+# Cada driver expone distintas propiedades: solo se exige que las que existen tengan el valor buscado. Sin ninguna, $null.
+function NicCheck($kv) { $p = @(NicProps $kv); if ($p.Count) { @($p | Where-Object { $_.v -ne [string]$kv[$_.k] }).Count -eq 0 } }
 `;
 
 const P_SUB = '54533251-82be-4824-96c1-47b60b740d00'; // procesador
@@ -646,8 +647,10 @@ function checkPS(t) {
   if (t.reg || t.L) c.push('(RegCheck $L)');
   if (t.pwr) c.push(`(PwrCheck ${pwrList(t)})`);
   if (t.nic) c.push(`(NicCheck ${nicHash(t)})`);
-  if (t.check) c.push(`(${t.check})`);
-  return `${t.pre || ''}\n$L=${lExpr(t)}\n[bool](${c.join(' -and ') || '$false'})`;
+  // RegCheck, NicCheck y TaskCheck dan $null si en esta PC no hay nada que revisar. Un chequeo propio se fuerza a bool.
+  if (t.check) c.push(/^TaskCheck /.test(t.check) ? `(${t.check})` : `[bool](${t.check})`);
+  // Si ninguna parte encontró qué revisar, 'na' (no aplica en esta PC); si no, activo = ninguna parte en falso.
+  return `${t.pre || ''}\n$L=${lExpr(t)}\n$c=@(${c.join(', ') || '$false'} | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }`;
 }
 function checkAllPS(list = TWEAKS) {
   return '$r=[ordered]@{}\n' + list.map(t =>
