@@ -142,6 +142,8 @@ pub struct App {
     pub startup: Vec<startup::Item>,
     /// Versión nueva disponible en GitHub, y si se está instalando.
     pub update: Option<update::Update>,
+    /// Modo de prueba (BX_FAKE): hardware AMD simulado. No deja aplicar nada en la PC.
+    pub fake: Option<String>,
     pub updating: bool,
     frames: u32,
     /// Cuándo se cambió de página (para el fundido de entrada).
@@ -175,7 +177,7 @@ fn main() -> eframe::Result {
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).expect("icono");
     let saved = load_saved();
     let mut vp = egui::ViewportBuilder::default()
-        .with_title("Botox Optimizer")
+        .with_title(match sys::fake_kind().as_deref() { Some("amd") => "Botox Optimizer · PRUEBA: Radeon + Ryzen simulados", Some(_) => "Botox Optimizer · PRUEBA: Ryzen X3D simulado", None => "Botox Optimizer" })
         .with_inner_size([1340.0, 860.0])
         .with_min_inner_size([1180.0, 720.0])
         .with_icon(icon)
@@ -240,6 +242,7 @@ impl App {
             page: match win::test_env("BX_PAGE").as_deref() { Some("scan") => Page::Scan, Some("tweaks") => Page::Tweaks, Some("debloat") => Page::Debloat, Some("boost") => Page::Boost, Some("backup") => Page::Backup, Some("startup") => Page::Startup, _ => Page::Home },
             startup: Vec::new(),
             update: None,
+            fake: sys::fake_kind(),
             updating: false,
             tab: win::test_env("BX_TAB").unwrap_or_else(|| "all".into()),
             query: String::new(),
@@ -293,7 +296,9 @@ impl App {
             app.startup = startup::scan();
         }
         update::cleanup_old();
-        app.spawn(|tx, _, _| { let _ = tx.send(Msg::Update(update::check())); });
+        if app.fake.is_none() {
+            app.spawn(|tx, _, _| { let _ = tx.send(Msg::Update(update::check())); });
+        }
         app
     }
 
@@ -349,6 +354,11 @@ impl App {
     }
 
     fn act(&mut self, a: Action) {
+        // En modo de prueba solo se puede mirar: ni tweaks, ni limpiezas, ni reinicios, ni actualizaciones, aunque la app tenga permisos de administrador.
+        if self.fake.is_some() && !matches!(a, Action::Go(..) | Action::Rescan | Action::RescanStartup) {
+            self.toast("Modo prueba: con hardware simulado no se aplica nada en la PC.", ACCENT, 3.5);
+            return;
+        }
         match a {
             Action::Go(page, tab) => {
                 if page != self.page {

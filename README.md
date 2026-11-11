@@ -63,6 +63,10 @@ Sin verificar en una Radeon real (la PC de desarrollo es Ryzen + NVIDIA): lo que
 
 `node rust/tools/parity-scan.js [ruta al .exe sin admin]` compara los dos campo por campo (solo lectura). Con el `.exe` de admin: `exe --scan > nativo.json`, `exe --scan ps > ps.json` (elevado) y `node rust/tools/parity-scan.js --files nativo.json ps.json`.
 
+## Probar con hardware AMD simulado
+
+`BX_FAKE=amd` (Ryzen 7 5700 + RX 7600), `x3d` (Ryzen 9 7950X3D sin driver de V-Cache) o `x3d-ok` reemplazan CPU y GPU del escaneo para ver la app como la vería una PC AMD. Es solo lectura: en este modo ninguna acción cambia nada, aunque la app tenga administrador. En `rust/dist/prueba` hay una copia sin admin con un acceso `.cmd` por variante (usan una carpeta temporal para no tocar tus datos).
+
 ## Pruebas visuales
 
 `rust/tools/shots.ps1 <carpeta>` saca una captura de cada pantalla sin cambiar nada en la PC.

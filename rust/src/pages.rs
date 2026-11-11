@@ -92,6 +92,22 @@ impl App {
             });
             return;
         }
+        if let Some(k) = self.fake.clone() {
+            let (que, tip) = match k.as_str() {
+                "amd" => ("Ryzen 7 5700 + Radeon RX 7600", "Como la PC de un amigo con Radeon."),
+                "x3d" => ("Ryzen 9 7950X3D + RX 7900 XTX, sin driver de V-Cache", "Mirá el Escáner y las pestañas Energía y Fps y latencia."),
+                _ => ("Ryzen 9 7950X3D + RX 7900 XTX, V-Cache en orden", "Mirá el Escáner y las pestañas Energía y Fps y latencia."),
+            };
+            egui::Frame::new().fill(Color32::from_rgb(34, 27, 18)).stroke(Stroke::new(1.0_f32, Color32::from_rgb(92, 62, 24))).corner_radius(12).inner_margin(egui::Margin::symmetric(18, 9)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(ic::FLASK).size(18.0).color(ACCENT));
+                    ui.label(RichText::new(format!("Modo prueba: hardware simulado ({que})")).font(semi(14.0)));
+                    ui.label(muted(format!("{tip} No se aplica nada en tu PC.")));
+                });
+            });
+            ui.add_space(10.0);
+        }
         if let Some(u) = self.update.clone() {
             egui::Frame::new().fill(Color32::from_rgb(34, 27, 18)).stroke(Stroke::new(1.0_f32, Color32::from_rgb(92, 62, 24))).corner_radius(12).inner_margin(egui::Margin::symmetric(18, 9)).show(ui, |ui| {
                 ui.set_width(ui.available_width());

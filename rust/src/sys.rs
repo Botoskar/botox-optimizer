@@ -6,7 +6,35 @@ use serde_json::Value;
 
 /// Escaneo de hardware: nativo con WMI; si WMI falla, cae al script de PowerShell (más lento, mismo resultado).
 pub fn scan(cat: &Catalog) -> Result<Value, String> {
-    crate::hwscan::scan().or_else(|_| scan_ps(cat))
+    let mut spec = crate::hwscan::scan().or_else(|_| scan_ps(cat))?;
+    if let Some(kind) = fake_kind() {
+        apply_fake(&mut spec, &kind);
+    }
+    Ok(spec)
+}
+
+/// Solo para probar: BX_FAKE=amd | x3d | x3d-ok simula el hardware de una PC AMD. Cualquier otro valor se ignora.
+/// Excepción documentada a "los BX_* solo en debug": se lee también en release (los lanzadores de `rust/dist/prueba`
+/// usan el .exe de release) porque solo quita poder: con BX_FAKE la app bloquea toda acción que cambie la PC.
+pub fn fake_kind() -> Option<String> { std::env::var("BX_FAKE").ok().filter(|k| matches!(k.as_str(), "amd" | "x3d" | "x3d-ok")) }
+
+/// Reemplaza CPU y GPU del escaneo por los de una PC AMD (el resto, RAM, discos y red, sigue siendo el de esta PC).
+///  - amd: Ryzen 7 5700 + Radeon RX 7600 (la PC de un amigo).
+///  - x3d: Ryzen 9 7950X3D + RX 7900 XTX, sin el driver de V-Cache (para ver el aviso).
+///  - x3d-ok: lo mismo, con el driver, Modo Juego y Game Bar en orden.
+/// HAGS figura apagado para que se vea la recomendación.
+pub fn apply_fake(spec: &mut Value, kind: &str) {
+    let (cpu, cores, threads, l3, gpu, vram) = match kind {
+        "amd" => ("AMD Ryzen 7 5700 8-Core Processor", 8, 16, 16, "AMD Radeon RX 7600", 8),
+        "x3d" | "x3d-ok" => ("AMD Ryzen 9 7950X3D 16-Core Processor", 16, 32, 128, "AMD Radeon RX 7900 XTX", 24),
+        _ => return,
+    };
+    spec["cpu"] = serde_json::json!({ "name": cpu, "maker": "AuthenticAMD", "cores": cores, "threads": threads, "mhz": 4200, "l3MB": l3 });
+    spec["gpus"] = serde_json::json!([{ "name": gpu, "vramGB": vram, "driver": "32.0.12033.1030", "refresh": 165, "res": "2560x1440" }]);
+    spec["hags"] = serde_json::json!(0);
+    if kind.starts_with("x3d") {
+        spec["x3d"] = serde_json::json!({ "svc": kind == "x3d-ok", "gameMode": true, "gameBar": true });
+    }
 }
 
 pub fn scan_ps(cat: &Catalog) -> Result<Value, String> {
@@ -250,6 +278,22 @@ mod tests {
         for expected in ["RAM a 3000 MHz DDR4", "PCIe 3.0", "Poca caché L3 (16 MB)", "Plan de energía: Equilibrado", "Red a 100 Mbps", "Pantalla a 240 Hz"] {
             assert!(titles.iter().any(|t| t.contains(expected)), "falta el hallazgo '{expected}' en {titles:?}");
         }
+    }
+
+    #[test]
+    fn el_modo_de_prueba_amd_simula_la_pc_correcta() {
+        let base = || json!({ "sysDrive": "C", "laptop": false, "reserved": "", "vbs": 0, "hags": 2, "planGuid": "x", "plan": "x", "cpu": { "name": "Intel", "cores": 6 },
+            "gpus": [{ "name": "NVIDIA GeForce RTX 4060", "vramGB": 8 }], "ram": { "gb": 16, "modules": [] }, "disks": [], "vols": [{ "letter": "C", "freeGB": 400 }], "os": { "uptimeH": 1 }, "nics": [] });
+        let ver = |kind: &str| { let mut s = base(); apply_fake(&mut s, kind); let f = facts(&s); let t: Vec<_> = findings(&s, &f).into_iter().map(|x| x.1).collect(); (f.gpu_vendor, f.amd_rdna2, f.x3d_dual, t) };
+        let (v, rdna, x3d, t) = ver("amd");
+        assert_eq!((v.as_str(), rdna, x3d), ("AMD", true, false));
+        assert!(t.iter().any(|x| x == "HAGS desactivado"), "{t:?}");
+        let (_, _, x3d, t) = ver("x3d");
+        assert!(x3d && t.iter().any(|x| x == "Falta el driver de V-Cache de AMD"), "{t:?}");
+        let (_, _, _, t) = ver("x3d-ok");
+        assert!(t.iter().any(|x| x == "V-Cache de AMD listo"), "{t:?}");
+        // Un valor desconocido no cambia nada.
+        let mut s = base(); apply_fake(&mut s, "otra-cosa"); assert_eq!(s, base());
     }
 
     #[test]
