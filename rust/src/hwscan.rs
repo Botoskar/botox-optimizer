@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::os::windows::process::CommandExt;
 use std::process::Command;
-use winreg::{enums::HKEY_LOCAL_MACHINE, RegKey};
+use winreg::{enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE}, RegKey};
 use wmi::{Variant, WMIConnection};
 
 const GPU_CLASS: &str = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}";
@@ -232,7 +232,7 @@ pub fn scan() -> Result<Value, String> {
     let reserved = match reg_num(r"HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\ReserveManager", "ShippedWithReserves") { Some(v) if v == 0.0 => "Disabled", Some(_) => "Enabled", None => "" };
     let join = |a: &Value, b: &Value| format!("{} {}", text(a), text(b)).trim().to_string();
 
-    Ok(json!({
+    let mut spec = json!({
         "pc": std::env::var("COMPUTERNAME").unwrap_or_default(),
         "admin": is_admin(),
         "laptop": !rows(&cim, "SELECT Name FROM Win32_Battery").is_empty(),
@@ -251,12 +251,36 @@ pub fn scan() -> Result<Value, String> {
         "plan": plan,
         "reserved": reserved,
         "planGuid": plan_guid,
-    }))
+    });
+    if text(&cpu["Name"]).to_uppercase().contains("X3D") {
+        spec["x3d"] = x3d_info();
+    }
+    Ok(spec)
+}
+
+/// Lo que necesita un Ryzen X3D de doble chiplet para que el driver de V-Cache mande los juegos al chiplet con caché:
+/// el servicio del driver de chipset de AMD, el Modo Juego de Windows y Xbox Game Bar. Solo se lee.
+fn x3d_info() -> Value {
+    let packages = r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages";
+    let game_bar = RegKey::predef(HKEY_CURRENT_USER).open_subkey(packages).is_ok_and(|k| k.enum_keys().flatten().any(|n| n.starts_with("Microsoft.XboxGamingOverlay_")));
+    json!({
+        "svc": reg::key_exists(r"HKLM:\SYSTEM\CurrentControlSet\Services\amd3dvcacheSvc"),
+        // Sin valor, Windows lo deja encendido.
+        "gameMode": reg_num(r"HKCU:\Software\Microsoft\GameBar", "AutoGameModeEnabled") != Some(0.0),
+        "gameBar": game_bar,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Lee las tres comprobaciones en esta PC (solo lectura). Esta PC no es X3D, pero Modo Juego y Game Bar se pueden leer igual.
+    #[test]
+    fn datos_de_vcache_se_leen_sin_fallar() {
+        let x = x3d_info();
+        assert!(x["svc"].is_boolean() && x["gameMode"].is_boolean() && x["gameBar"].is_boolean(), "{x}");
+    }
 
     #[test]
     fn letras_de_unidad() {

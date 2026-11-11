@@ -36,8 +36,21 @@ pub fn facts(spec: &Value) -> Facts {
         gpu_vendor: if gpu.contains("nvidia") { "NVIDIA" } else if gpu.contains("amd") || gpu.contains("radeon") { "AMD" } else if gpu.contains("intel") { "Intel" } else { "" }.into(),
         sys_disk_ssd: sys_disk.is_some_and(|d| s(&d["media"]).to_lowercase().contains("ssd") || s(&d["bus"]).to_lowercase().contains("nvme")),
         reserved_ok: !s(&spec["reserved"]).is_empty(),
+        amd_rdna2: is_rdna2(&gpu),
+        x3d_dual: is_x3d_dual(s(&spec["cpu"]["name"]), n(&spec["cpu"]["cores"])),
     }
 }
+
+/// Radeon RX 6000 o más nueva: "RX " y 4 cifras que empiezan en 6-9. La RX 580 (3 cifras) y la RX 5700 XT quedan afuera.
+fn is_rdna2(gpu_lower: &str) -> bool {
+    gpu_lower.contains("radeon") && gpu_lower.split("rx ").skip(1).any(|r| {
+        let d: String = r.chars().take_while(char::is_ascii_digit).collect();
+        d.len() == 4 && matches!(d.as_bytes()[0], b'6'..=b'9')
+    })
+}
+
+/// X3D con dos chiplets (7900X3D, 7950X3D, 9900X3D, 9950X3D): 12 núcleos o más. Los de un solo chiplet (5800X3D, 7800X3D, 9800X3D) tienen 8.
+fn is_x3d_dual(cpu: &str, cores: f64) -> bool { cpu.to_uppercase().contains("X3D") && cores >= 12.0 }
 
 /// Ryzen de escritorio basados en chips de APU: solo manejan PCIe 3.0, aunque la placa madre soporte 4.0.
 fn pcie3_only(cpu: &str) -> bool {
@@ -89,8 +102,21 @@ pub fn findings(spec: &Value, f: &Facts) -> Vec<(&'static str, String, String)> 
     } else {
         add("ok", "VBS desactivada".into(), "Sin costo de rendimiento por virtualización.");
     }
-    if f.gpu_vendor == "NVIDIA" && n(&spec["hags"]) != 2.0 {
-        add("warn", "HAGS desactivado".into(), "La programación de GPU acelerada baja la latencia en placas NVIDIA.");
+    if (f.gpu_vendor == "NVIDIA" || f.amd_rdna2) && n(&spec["hags"]) != 2.0 {
+        add("warn", "HAGS desactivado".into(), "La programación de GPU acelerada baja la latencia de entrada en tu placa de video. Activala en Optimizaciones.");
+    }
+    if f.x3d_dual {
+        // Solo se afirma lo que el escáner pudo leer; con el escáner de respaldo (sin estos datos) no se dice nada.
+        let x = &spec["x3d"];
+        if x["svc"].as_bool() == Some(false) {
+            add("bad", "Falta el driver de V-Cache de AMD".into(), "Tu Ryzen X3D tiene dos chiplets y solo uno lleva la caché extra. Sin el driver de chipset de AMD, los juegos pueden caer en el otro y rendir menos. Instalá el último desde amd.com.");
+        } else if x["gameMode"].as_bool() == Some(false) {
+            add("warn", "Modo Juego apagado".into(), "El driver de V-Cache de AMD usa el Modo Juego de Windows para reconocer los juegos. Activalo en Configuración › Juegos.");
+        } else if x["gameBar"].as_bool() == Some(false) {
+            add("warn", "Falta Xbox Game Bar".into(), "El driver de V-Cache de AMD la necesita para reconocer los juegos. Instalala desde Microsoft Store (no hace falta usarla).");
+        } else if x["svc"].as_bool() == Some(true) {
+            add("ok", "V-Cache de AMD listo".into(), "Driver de chipset, Modo Juego y Game Bar en orden: los juegos van al chiplet con caché.");
+        }
     }
     let plan = s(&spec["planGuid"]).to_lowercase();
     if plan.starts_with("381b4222") || plan.starts_with("a1841308") {
@@ -191,10 +217,52 @@ mod tests {
         });
         let f = facts(&spec);
         assert_eq!((f.ram_gb, f.c_free_gb, f.gpu_vendor.as_str(), f.sys_disk_ssd, f.reserved_ok, f.laptop), (16, 465, "AMD", true, false, false));
+        assert!(f.amd_rdna2 && !f.x3d_dual, "RX 7600 sí es RDNA 2+; un Ryzen 7 5700 no es X3D");
         let titles: Vec<String> = findings(&spec, &f).into_iter().map(|x| x.1).collect();
         for expected in ["RAM a 3000 MHz DDR4", "PCIe 3.0", "Poca caché L3 (16 MB)", "Plan de energía: Equilibrado", "Red a 100 Mbps", "Pantalla a 240 Hz"] {
             assert!(titles.iter().any(|t| t.contains(expected)), "falta el hallazgo '{expected}' en {titles:?}");
         }
+    }
+
+    #[test]
+    fn detecta_radeon_rx_6000_o_mas() {
+        for (name, esperado) in [
+            ("amd radeon rx 7600", true), ("amd radeon rx 6600 xt", true), ("amd radeon rx 9070 xt", true), ("amd radeon rx 7900 xtx", true),
+            ("amd radeon rx 580 series", false), ("amd radeon rx 5700 xt", false), ("amd radeon rx vega 56", false),
+            ("amd radeon(tm) graphics", false), ("nvidia geforce rtx 4060", false), ("amd radeon 780m graphics", false),
+        ] {
+            assert_eq!(is_rdna2(name), esperado, "{name}");
+        }
+    }
+
+    #[test]
+    fn detecta_ryzen_x3d_de_doble_chiplet() {
+        for (cpu, nucleos, esperado) in [
+            ("AMD Ryzen 9 7950X3D 16-Core Processor", 16.0, true), ("AMD Ryzen 9 7900X3D 12-Core Processor", 12.0, true), ("AMD Ryzen 9 9950X3D 16-Core Processor", 16.0, true),
+            ("AMD Ryzen 7 7800X3D 8-Core Processor", 8.0, false), ("AMD Ryzen 7 5800X3D 8-Core Processor", 8.0, false), ("AMD Ryzen 9 7950X 16-Core Processor", 16.0, false),
+        ] {
+            assert_eq!(is_x3d_dual(cpu, nucleos), esperado, "{cpu}");
+        }
+    }
+
+    #[test]
+    fn hallazgos_de_vcache_solo_con_datos_del_escaneo() {
+        let base = |x3d: serde_json::Value| {
+            let mut spec = json!({
+                "sysDrive": "C", "laptop": false, "reserved": "", "vbs": 0, "hags": 2, "planGuid": "381b4222-f694-41f0-9685-ff5bb260df2e", "plan": "Equilibrado",
+                "cpu": { "name": "AMD Ryzen 9 7950X3D 16-Core Processor", "cores": 16, "l3MB": 128 }, "gpus": [{ "name": "NVIDIA GeForce RTX 4080", "vramGB": 16 }],
+                "ram": { "gb": 32, "modules": [] }, "disks": [], "vols": [{ "letter": "C", "freeGB": 400 }], "os": { "uptimeH": 1 }, "nics": []
+            });
+            if !x3d.is_null() { spec["x3d"] = x3d; }
+            let f = facts(&spec);
+            assert!(f.x3d_dual);
+            findings(&spec, &f).into_iter().filter(|x| x.1.contains("V-Cache") || x.1.contains("Modo Juego") || x.1.contains("Game Bar")).map(|x| (x.0, x.1)).collect::<Vec<_>>()
+        };
+        assert_eq!(base(json!({ "svc": false, "gameMode": true, "gameBar": true })), [("bad", "Falta el driver de V-Cache de AMD".to_string())]);
+        assert_eq!(base(json!({ "svc": true, "gameMode": false, "gameBar": true })), [("warn", "Modo Juego apagado".to_string())]);
+        assert_eq!(base(json!({ "svc": true, "gameMode": true, "gameBar": false })), [("warn", "Falta Xbox Game Bar".to_string())]);
+        assert_eq!(base(json!({ "svc": true, "gameMode": true, "gameBar": true })), [("ok", "V-Cache de AMD listo".to_string())]);
+        assert!(base(serde_json::Value::Null).is_empty(), "sin datos del escaneo no se afirma nada");
     }
 
     #[test]

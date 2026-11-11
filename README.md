@@ -15,7 +15,7 @@ El toolchain (Rust + mingw64) está en `M:\Github Things\botox-optimizer-rust` y
 ```bash
 cd rust
 cmd //c ".\\cargo.cmd build"                         # desarrollo, sin admin (modo solo lectura)
-cmd //c ".\\cargo.cmd test"                          # 24 tests
+cmd //c ".\\cargo.cmd test"                          # 31 tests
 BX_ADMIN=1 cmd //c ".\\cargo.cmd build --release"    # versión para usar: pide administrador
 ```
 
@@ -40,6 +40,14 @@ Las versiones anteriores a 2.1.0 no saben actualizarse: hay que pasarles el `.ex
 2. `node rust/tools/export-catalog.js`.
 3. Si usa una condición nueva en `rec` o `needs`, portala en `rust/src/catalog.rs` (`cond`).
 4. `cargo.cmd test` y `node rust/tools/parity.js <ruta al .exe sin admin>` (compara los estados de Rust con los scripts originales, solo lectura).
+
+## AMD (Radeon y Ryzen)
+
+Sin verificar en una Radeon real (la PC de desarrollo es Ryzen + NVIDIA): lo que hay sale de documentación y de los tests.
+
+- `amdtelemetry`: apaga los servicios `AUEPLauncher` y `AMD Crash Defender Service` y las tareas de Adrenalin. **No** toca `AMD External Events Utility` (lo usa FreeSync). Fuente: wiki de RadeonSoftwareSlimmer.
+- HAGS se recomienda en NVIDIA y en Radeon RX 6000 o más nueva (`amdRdna2`, ver `is_rdna2` en `sys.rs`).
+- Ryzen X3D de **doble chiplet** (7900X3D, 7950X3D, 9900X3D, 9950X3D; `x3dDual`: X3D con 12+ núcleos): no se ofrecen "Máximo rendimiento" ni "Desactivar estacionamiento de núcleos", porque el driver de V-Cache (`amd3dvcacheSvc`) usa el estacionamiento para mandar los juegos al chiplet con caché. El escáner agrega `x3d` (driver, Modo Juego, Game Bar) y la página Escáner muestra un hallazgo.
 
 ## Escáner de hardware
 

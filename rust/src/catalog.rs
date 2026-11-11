@@ -72,6 +72,10 @@ pub struct Facts {
     pub gpu_vendor: String,
     pub sys_disk_ssd: bool,
     pub reserved_ok: bool,
+    /// Radeon RX 6000 o más nueva (RDNA 2+): ahí HAGS se recomienda.
+    pub amd_rdna2: bool,
+    /// Ryzen X3D de doble chiplet (7900X3D, 7950X3D, 9900X3D, 9950X3D): su driver depende del estacionamiento de núcleos.
+    pub x3d_dual: bool,
 }
 
 /// Evalúa una condición del catálogo. Son las funciones JS del catálogo original, portadas una por una.
@@ -80,8 +84,10 @@ pub fn cond(src: &str, f: &Facts) -> bool {
     match src {
         "() => true" => true,
         "s => !s.laptop" => !f.laptop,
+        "s => !s.laptop && !s.x3dDual" => !f.laptop && !f.x3d_dual,
         "s => s.laptop" => f.laptop,
         "s => s.gpuVendor === 'NVIDIA'" => nv,
+        "s => s.gpuVendor === 'NVIDIA' || s.amdRdna2" => nv || f.amd_rdna2,
         "s => s.gpuVendor === 'AMD'" => amd,
         "s => s.gpuVendor === 'NVIDIA' || s.gpuVendor === 'AMD'" => nv || amd,
         "s => !!s.gpuVendor" => !f.gpu_vendor.is_empty(),
@@ -136,5 +142,42 @@ mod tests {
         }
         let ids: std::collections::HashSet<_> = c.tweaks.iter().map(|t| &t.id).collect();
         assert_eq!(ids.len(), c.tweaks.len(), "hay ids repetidos");
+    }
+
+    fn con(f: Facts) -> impl Fn(&str) -> (bool, bool) {
+        let c = Catalog::load();
+        move |id| { let t = c.tweak(id).unwrap(); (t.applies(&f), t.recommended(&f)) }
+    }
+
+    #[test]
+    fn ryzen_x3d_de_doble_chiplet_no_ofrece_lo_que_rompe_su_driver() {
+        let normal = con(Facts { gpu_vendor: "NVIDIA".into(), ..Default::default() });
+        assert_eq!((normal("coreparking"), normal("ultimate")), ((true, true), (true, true)));
+        let x3d = con(Facts { x3d_dual: true, ..Default::default() });
+        assert_eq!((x3d("coreparking"), x3d("ultimate")), ((false, false), (false, false)));
+        // En una notebook tampoco, como antes.
+        assert_eq!(con(Facts { laptop: true, ..Default::default() })("coreparking"), (false, false));
+    }
+
+    #[test]
+    fn hags_se_recomienda_en_nvidia_y_en_radeon_rx_6000_o_mas() {
+        let nv = con(Facts { gpu_vendor: "NVIDIA".into(), ..Default::default() });
+        let rdna2 = con(Facts { gpu_vendor: "AMD".into(), amd_rdna2: true, ..Default::default() });
+        let viejo = con(Facts { gpu_vendor: "AMD".into(), ..Default::default() }); // p. ej. una RX 580
+        let intel = con(Facts { gpu_vendor: "Intel".into(), ..Default::default() });
+        assert_eq!((nv("hags"), rdna2("hags"), viejo("hags"), intel("hags")), ((true, true), (true, true), (true, false), (false, false)));
+    }
+
+    #[test]
+    fn la_telemetria_de_amd_toca_solo_los_servicios_de_telemetria() {
+        // Este tweak lleva pasos propios de PowerShell: los servicios van dentro de los scripts generados (como en nvtelemetry).
+        let c = Catalog::load();
+        let ps = c.tweak("amdtelemetry").unwrap().ps.as_ref().expect("amdtelemetry usa PowerShell");
+        for script in [&ps.apply, &ps.revert, &ps.check] {
+            assert!(script.contains("Services\\AUEPLauncher") && script.contains("Services\\AMD Crash Defender Service"), "falta un servicio en: {script}");
+            // Sin AMD External Events Utility FreeSync deja de andar: nunca se toca.
+            assert!(!script.contains("External Events"), "no hay que tocar AMD External Events Utility");
+        }
+        assert!(ps.apply.contains("StopSvc 'AUEPLauncher'") && ps.apply.contains("StopSvc 'AMD Crash Defender Service'"));
     }
 }

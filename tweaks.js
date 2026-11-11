@@ -186,8 +186,8 @@ const game = (id, title, exe) => ({
 // reg: entradas de registro | L: lista de registro calculada en PowerShell | apply/revert/check: PowerShell extra
 const TWEAKS = [
   // ───────────── FPS y latencia ─────────────
-  { id: 'ultimate', needs: s => !s.laptop, cat: 'fps', name: 'Plan de energía Máximo rendimiento', rec: s => !s.laptop,
-    desc: 'Activa el plan "Ultimate Performance" oculto de Windows: CPU sin estados de ahorro y sin estacionar núcleos. Más FPS mínimos y menos micro-tirones.',
+  { id: 'ultimate', needs: s => !s.laptop && !s.x3dDual, cat: 'fps', name: 'Plan de energía Máximo rendimiento', rec: s => !s.laptop && !s.x3dDual,
+    desc: 'Activa el plan "Ultimate Performance" oculto de Windows: CPU sin estados de ahorro y sin estacionar núcleos. Más FPS mínimos y menos micro-tirones. No se ofrece en Ryzen X3D de doble chiplet: el driver de AMD usa el estacionamiento de núcleos para mandar los juegos al chiplet con V-Cache.',
     apply: String.raw`$g='3f5c8a2e-6b1d-4e7a-9c0f-ff0000000001'; if(-not ((powercfg /list | Out-String) -match $g)){ powercfg -duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61 $g | Out-Null; powercfg /changename $g 'Botox Optimizer Ultimate' | Out-Null }; powercfg /setactive $g`,
     revert: String.raw`powercfg /setactive 381b4222-f694-41f0-9685-ff5bb260df2e; if((powercfg /list | Out-String) -match '3f5c8a2e'){ powercfg /delete 3f5c8a2e-6b1d-4e7a-9c0f-ff0000000001 }`,
     check: String.raw`(powercfg /getactivescheme | Out-String) -match '3f5c8a2e'` },
@@ -195,8 +195,8 @@ const TWEAKS = [
     desc: 'Windows le da prioridad al juego en primer plano y frena actualizaciones y tareas de fondo mientras jugás.',
     reg: [R('HKCU:/Software/Microsoft/GameBar', 'AutoGameModeEnabled', 1), R('HKCU:/Software/Microsoft/GameBar', 'AllowAutoGameMode', 1)] },
   { id: 'hags', cat: 'fps', name: 'Programación de GPU acelerada (HAGS)', reboot: true,
-    needs: s => s.gpuVendor === 'NVIDIA' || s.gpuVendor === 'AMD', rec: s => s.gpuVendor === 'NVIDIA',
-    desc: 'La GPU administra su propia cola de trabajo. Baja la latencia de entrada y es necesario para DLSS Frame Generation.',
+    needs: s => s.gpuVendor === 'NVIDIA' || s.gpuVendor === 'AMD', rec: s => s.gpuVendor === 'NVIDIA' || s.amdRdna2,
+    desc: 'La GPU administra su propia cola de trabajo. Baja la latencia de entrada y es necesario para DLSS Frame Generation (NVIDIA). En Radeon se recomienda desde la RX 6000.',
     reg: [R('HKLM:/SYSTEM/CurrentControlSet/Control/GraphicsDrivers', 'HwSchMode', 2)] },
   { id: 'gamedvr', cat: 'fps', name: 'Desactivar Game DVR y grabación de fondo', rec: () => true,
     desc: 'Apaga la grabación en segundo plano de Xbox Game Bar, que consume GPU y disco mientras jugás.',
@@ -282,8 +282,8 @@ const TWEAKS = [
   { id: 'aspm', needs: s => !s.laptop, cat: 'power', name: 'Desactivar ahorro de energía PCIe (ASPM)', rec: s => !s.laptop,
     desc: 'La GPU y el NVMe no entran en estados de bajo consumo del bus PCIe: menos latencia al despertar.',
     pwr: [['501a4d13-42af-4429-9fd1-a8218c268e20', 'ee12f906-d277-404b-b6da-e5fa1a576df5', 0, 1]] },
-  { id: 'coreparking', needs: s => !s.laptop, cat: 'power', name: 'Desactivar estacionamiento de núcleos', rec: s => !s.laptop,
-    desc: 'Todos los núcleos quedan disponibles: sin la demora de "despertar" un núcleo dormido cuando el juego lo pide.',
+  { id: 'coreparking', needs: s => !s.laptop && !s.x3dDual, cat: 'power', name: 'Desactivar estacionamiento de núcleos', rec: s => !s.laptop && !s.x3dDual,
+    desc: 'Todos los núcleos quedan disponibles: sin la demora de "despertar" un núcleo dormido cuando el juego lo pide. No se ofrece en Ryzen X3D de doble chiplet: el driver de V-Cache de AMD necesita estacionar el chiplet sin caché mientras jugás.',
     pwr: [[P_SUB, '0cc5b647-c1df-4637-891a-dec35c318583', 100, 10]] },
   { id: 'cpuboost', needs: s => !s.laptop, cat: 'power', name: 'Boost del procesador agresivo',
     desc: 'El CPU sube a su frecuencia turbo lo más rápido posible. Más calor, mejor respuesta.',
@@ -346,9 +346,12 @@ const TWEAKS = [
   { id: 'mpo', cat: 'gpu', name: 'Desactivar Multiplane Overlay (MPO)', risk: 'med', reboot: true,
     desc: 'MPO causa parpadeos, pantallazos negros o tirones en algunas PC con NVIDIA o AMD, sobre todo con dos monitores. Activalo solo si tenés esos síntomas.',
     reg: [R('HKLM:/SOFTWARE/Microsoft/Windows/Dwm', 'OverlayTestMode', 5)] },
-  // Sin verificar en una PC con Radeon: los nombres de las tareas salen de instalaciones típicas de Adrenalin.
-  { id: 'amdtelemetry', cat: 'gpu', name: 'Desactivar tareas de fondo de AMD', needs: s => s.gpuVendor === 'AMD', rec: s => s.gpuVendor === 'AMD',
-    desc: 'Deshabilita las tareas programadas de Adrenalin que buscan actualizaciones y lanzan el instalador de fondo. El driver y el panel siguen funcionando.',
+  // Sin verificar en una PC con Radeon. Los servicios son los que lista el wiki de RadeonSoftwareSlimmer (AUEPLauncher = Programa de
+  // Experiencia de Usuario de AMD; AMD Crash Defender Service = reportes de fallos). A propósito NO se toca "AMD External Events Utility":
+  // lo usa FreeSync y otras funciones de Radeon. Las tareas salen de instalaciones típicas de Adrenalin; las que no existen se saltean.
+  { id: 'amdtelemetry', cat: 'gpu', name: 'Desactivar telemetría y tareas de fondo de AMD', needs: s => s.gpuVendor === 'AMD', rec: s => s.gpuVendor === 'AMD',
+    desc: 'Apaga el Programa de Experiencia de Usuario y el servicio de reportes de fallos de AMD, y las tareas de Adrenalin que buscan actualizaciones. El driver, FreeSync y el panel siguen funcionando.',
+    reg: [S('AUEPLauncher', 4, 2), S('AMD Crash Defender Service', 4, 2)],
     pre: '$T=' + psArr(['\\AMDInstallLauncher', '\\AMDLinkUpdate', '\\AMDAutoUpdate*', '\\ModifyLinkUpdate', '\\AMDScoSupportTypeUpdate']),
     apply: 'TaskSet $T $false', revert: 'TaskSet $T $true', check: 'TaskCheck $T' },
 
