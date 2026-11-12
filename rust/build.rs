@@ -15,7 +15,8 @@ fn main() {
 
     // Ícono del .exe (Explorador, escritorio, barra de tareas). windres viene con mingw64 (cargo.cmd lo pone en el PATH).
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    let ico = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets").join("icon.ico");
+    // En tiempo de ejecución, no `env!`: con el target compartido (R:\target) el script compilado guardaba la ruta vieja si se movía la carpeta.
+    let ico = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("assets").join("icon.ico");
     let rc = out.join("icon.rc");
     std::fs::write(&rc, format!("1 ICON \"{}\"\n", ico.display().to_string().replace('\\', "/"))).unwrap();
     let obj = out.join("icon.o");

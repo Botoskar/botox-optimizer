@@ -2,6 +2,7 @@
 //! Los respaldos usan el mismo formato y carpeta que la app Electron
 //! (%ProgramData%\BotoxOptimizer\backup\<id>.json), así los que ya existen se pueden revertir desde acá.
 use serde_json::{json, Value};
+use std::io::Write;
 use std::path::PathBuf;
 use winreg::enums::*;
 use winreg::{RegKey, RegValue};
@@ -95,37 +96,102 @@ pub fn service_of<'a>(p: &'a str, n: &str) -> Option<&'a str> {
 // ── Respaldos ──
 
 pub fn backup_dir() -> PathBuf {
-    // BX_BACKUP_DIR: otra carpeta, para los tests.
+    // BX_BACKUP_DIR solo existe en builds de prueba. En release la carpeta es siempre la de Windows.
+    #[cfg(debug_assertions)]
     if let Ok(d) = std::env::var("BX_BACKUP_DIR") {
         return PathBuf::from(d);
     }
-    PathBuf::from(std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".into())).join("BotoxOptimizer").join("backup")
+    crate::win::program_data().join("BotoxOptimizer").join("backup")
 }
 pub fn backup_path(id: &str) -> PathBuf { backup_dir().join(format!("{id}.json")) }
+
+/// Rechaza enlaces y, con la app elevada, todo lo que no sea de SYSTEM/Administradores: ProgramData deja que un
+/// usuario normal cree carpetas y archivos ahí, y un respaldo plantado se aplicaría como administrador.
+fn guard(p: &std::path::Path) -> Result<(), String> {
+    if crate::engine::is_admin() {
+        crate::win::require_admin_owned(p)
+    } else if crate::win::is_reparse_point(p) {
+        Err(format!("{} es un enlace/reparse point: no se usa para respaldos", p.display()))
+    } else {
+        Ok(())
+    }
+}
+
+/// Crea la carpeta y, con la app elevada, exige que sea de un administrador y la deja solo para SYSTEM y Administradores.
+fn ensure_dir() -> Result<(), String> {
+    let dir = backup_dir();
+    let checks = match dir.parent() {
+        Some(parent) => vec![parent.to_path_buf(), dir.clone()],
+        None => vec![dir.clone()],
+    };
+    // Un junction/symlink plantado en ProgramData redirigiría escrituras elevadas a otra carpeta.
+    for p in checks.iter().filter(|p| p.exists()) {
+        guard(p)?;
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("no se pudo crear la carpeta de respaldos: {e}"))?;
+    for p in &checks {
+        guard(p)?;
+    }
+    if crate::engine::is_admin() {
+        crate::win::harden_dir(&dir)?;
+    }
+    Ok(())
+}
 
 /// Guarda el respaldo solo si no existe (nunca pisa los valores originales). Devuelve true si lo creó.
 pub fn save_backup(id: &str, items: &Value) -> Result<bool, String> {
     let f = backup_path(id);
-    if f.exists() {
+    if f.exists() || crate::win::is_reparse_point(&f) {
+        // Uno que ya existe tiene que ser legítimo: si lo plantó otro usuario, no se toma como "los valores originales".
+        guard(&f)?;
         return Ok(false);
     }
-    std::fs::create_dir_all(backup_dir()).map_err(|e| format!("no se pudo crear la carpeta de respaldos: {e}"))?;
-    // Con BOM, igual que PowerShell 5.1, para que la app Electron también lo lea bien.
+    ensure_dir()?;
     let text = format!("\u{feff}{}", serde_json::to_string_pretty(items).unwrap());
-    std::fs::write(&f, text).map_err(|e| format!("no se pudo guardar el respaldo: {e}"))?;
+    // create_new: si otro proceso (o un archivo plantado) ya lo creó, no se escribe encima.
+    let mut file = match std::fs::OpenOptions::new().write(true).create_new(true).open(&f) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(e) => return Err(format!("no se pudo guardar el respaldo: {e}")),
+    };
+    if let Err(e) = file.write_all(text.as_bytes()) {
+        let _ = std::fs::remove_file(&f);
+        return Err(format!("no se pudo guardar el respaldo: {e}"));
+    }
+    if let Err(e) = file.sync_all() {
+        let _ = std::fs::remove_file(&f);
+        return Err(format!("no se pudo guardar el respaldo: {e}"));
+    }
     Ok(true)
 }
 
-/// Lee y borra el respaldo. Siempre devuelve una lista.
-pub fn take_backup(id: &str) -> Option<Vec<Value>> {
+/// Lee el respaldo sin borrarlo. Si está corrupto devuelve Err y lo deja en disco para poder revisarlo.
+pub fn read_backup(id: &str) -> Result<Option<Vec<Value>>, String> {
     let f = backup_path(id);
-    let text = std::fs::read_to_string(&f).ok()?;
-    let _ = std::fs::remove_file(&f);
-    match serde_json::from_str::<Value>(text.trim_start_matches('\u{feff}')).ok()? {
-        Value::Array(a) => Some(a),
-        Value::Null => Some(vec![]),
-        one => Some(vec![one]),
+    if !f.exists() && !crate::win::is_reparse_point(&f) {
+        return Ok(None);
     }
+    // Carpeta y archivo: con la app elevada, solo se aplica un respaldo escrito por un administrador.
+    if let Some(dir) = f.parent() {
+        guard(dir)?;
+    }
+    guard(&f)?;
+    let text = match std::fs::read_to_string(&f) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("no se pudo leer {}: {e}", f.display())),
+    };
+    let value: Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|e| format!("el respaldo {} está dañado: {e}", f.display()))?;
+    Ok(Some(match value {
+        Value::Array(a) => a,
+        Value::Null => vec![],
+        one => vec![one],
+    }))
+}
+
+/// Borra el respaldo recién cuando la reversión terminó bien.
+pub fn remove_backup(id: &str) {
+    let _ = std::fs::remove_file(backup_path(id));
 }
 
 #[cfg(test)]
@@ -144,6 +210,16 @@ mod tests {
         assert_eq!(service_of("HKLM:\\SYSTEM\\CurrentControlSet\\Services\\DiagTrack", "Start"), Some("DiagTrack"));
         assert_eq!(service_of("HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters", "Start"), None);
         assert_eq!(service_of("HKLM:\\SYSTEM\\CurrentControlSet\\Services\\DiagTrack", "Otro"), None);
+    }
+
+    #[test]
+    fn multistring_lleva_un_solo_nul_extra_al_final() {
+        // Formato de REG_MULTI_SZ: cada cadena con su NUL y uno más al final ("a\0b\0\0"), ni más ni menos.
+        const KEY: &str = r"HKCU:\Software\BotoxRegMultiTest";
+        set(KEY, "M", &json!(["a", "b"]), "MultiString").unwrap();
+        let raw = RegKey::predef(HKEY_CURRENT_USER).open_subkey(r"Software\BotoxRegMultiTest").unwrap().get_raw_value("M").unwrap();
+        let _ = RegKey::predef(HKEY_CURRENT_USER).delete_subkey_all(r"Software\BotoxRegMultiTest");
+        assert_eq!(raw.bytes, "a\0b\0\0".encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>());
     }
 
     #[test]

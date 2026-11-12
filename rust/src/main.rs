@@ -4,10 +4,12 @@ mod engine;
 mod hwscan;
 mod pages;
 mod reg;
+mod sha256;
 mod startup;
 mod sys;
 mod theme;
 mod update;
+mod win;
 
 use catalog::{Catalog, Facts};
 use eframe::egui::{self, Align2, Color32, Pos2, Rect, RichText, Sense, Vec2};
@@ -62,6 +64,8 @@ pub enum Action {
     Reboot,
     RebootNow,
     Rescan,
+    /// Detiene los PowerShell en curso (chequeos, tweaks o limpiezas).
+    Cancel,
     CreateRestore,
     OpenRestore,
     RevertAll,
@@ -138,6 +142,8 @@ pub struct App {
     pub startup: Vec<startup::Item>,
     /// Versión nueva disponible en GitHub, y si se está instalando.
     pub update: Option<update::Update>,
+    /// Modo de prueba (BX_FAKE): hardware AMD simulado. No deja aplicar nada en la PC.
+    pub fake: Option<String>,
     pub updating: bool,
     frames: u32,
     /// Cuándo se cambió de página (para el fundido de entrada).
@@ -147,6 +153,12 @@ pub struct App {
 }
 
 fn main() -> eframe::Result {
+    // El actualizador corre `exe --version` antes de instalar: tiene que contestar sin abrir nada más.
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    install_panic_log();
     // Modo de prueba, solo lectura: imprime el estado de todos los tweaks como JSON y sale.
     if std::env::args().any(|a| a == "--check") {
         let cat = Catalog::load();
@@ -168,10 +180,20 @@ fn main() -> eframe::Result {
         println!("{}", spec.map_or_else(|e| format!("{{\"error\":{}}}", Value::String(e)), |v| v.to_string()));
         return Ok(());
     }
+    // Las copias de prueba (BX_FAKE, capturas) no cambian nada en la PC: pueden abrirse junto a la app real y no tocan
+    // la actualización. La real primero toma el mutex: así otra instancia (o la vieja que todavía cierra) no la hace
+    // salir con el marcador ya en "1", ni dos arranques juntos deciden volver atrás.
+    if !is_test_copy() {
+        if !win::single_instance() {
+            return Ok(());
+        }
+        // Restaura la versión anterior si la nueva no llegó a arrancar bien (puede no volver: abre la vieja y sale).
+        update::on_start();
+    }
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).expect("icono");
     let saved = load_saved();
     let mut vp = egui::ViewportBuilder::default()
-        .with_title("Botox Optimizer")
+        .with_title(match sys::fake_kind().as_deref() { Some("amd") => "Botox Optimizer · PRUEBA: Radeon + Ryzen simulados", Some(_) => "Botox Optimizer · PRUEBA: Ryzen X3D simulado", None => "Botox Optimizer" })
         .with_inner_size([1340.0, 860.0])
         .with_min_inner_size([1180.0, 720.0])
         .with_icon(icon)
@@ -184,8 +206,30 @@ fn main() -> eframe::Result {
     eframe::run_native("Botox Optimizer", opts, Box::new(|cc| Ok(Box::new(App::new(cc)))))
 }
 
+/// En release la app no tiene consola: un panic la cerraría sin dejar rastro. Se anota en
+/// %LOCALAPPDATA%\BotoxOptimizer\crash.log la fecha, la versión, el mensaje, dónde pasó y el backtrace
+/// (rutas de código y funciones; no datos del usuario).
+/// Copia de prueba (BX_FAKE o captura): sin mutex ni confirmación/vuelta atrás de actualizaciones.
+fn is_test_copy() -> bool {
+    sys::fake_kind().is_some() || win::test_env("BX_SHOT").is_some()
+}
+
+fn install_panic_log() {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let p = saved_path().with_file_name("crash.log");
+        let _ = std::fs::create_dir_all(p.parent().unwrap());
+        // Un log que crece sin límite no ayuda: pasado 1 MB se empieza de nuevo.
+        let append = std::fs::metadata(&p).is_ok_and(|m| m.len() < 1 << 20);
+        let text = format!("--- {} · v{} · unix {}\n{info}\n{}\n", if engine::is_admin() { "admin" } else { "sin admin" }, env!("CARGO_PKG_VERSION"), unix_now(), std::backtrace::Backtrace::force_capture());
+        let file = std::fs::OpenOptions::new().create(true).append(append).write(true).truncate(!append).open(&p);
+        let _ = file.and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()));
+        prev(info);
+    }));
+}
+
 fn saved_path() -> std::path::PathBuf {
-    std::path::PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into())).join("BotoxOptimizer").join("state.json")
+    crate::win::local_app_data().join("BotoxOptimizer").join("state.json")
 }
 
 /// Imagen propia del usuario (reemplaza la del perro), ya recortada a 512×512.
@@ -204,17 +248,44 @@ fn avatar_texture(ctx: &egui::Context, img: &image::RgbaImage) -> egui::TextureH
 
 /// Abre una imagen mirando su contenido, no la extensión: muchas ".jpg" bajadas de internet son WebP o PNG.
 fn open_image(path: impl AsRef<std::path::Path>) -> Result<image::DynamicImage, String> {
-    image::ImageReader::open(path).and_then(|r| r.with_guessed_format()).map_err(|e| e.to_string())?.decode().map_err(|e| e.to_string())
+    // Límites antes de decodificar: una imagen gigante (o un archivo armado para eso) no se lleva toda la memoria.
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 50 << 20) {
+        return Err("la imagen pesa más de 50 MB".into());
+    }
+    let mut r = image::ImageReader::open(path).and_then(|r| r.with_guessed_format()).map_err(|e| e.to_string())?;
+    let mut lim = image::Limits::default();
+    lim.max_image_width = Some(MAX_SIDE);
+    lim.max_image_height = Some(MAX_SIDE);
+    r.limits(lim);
+    r.decode().map_err(|e| e.to_string())
 }
+
+/// Lado máximo de una imagen para el logo (luego se achica a 512 px igual).
+const MAX_SIDE: u32 = 12_000;
 
 /// Imagen copiada en el portapapeles, o un archivo de imagen copiado en el Explorador.
 fn clipboard_image() -> Result<image::DynamicImage, String> {
     let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
     if let Ok(i) = cb.get_image() {
+        if i.width > MAX_SIDE as usize || i.height > MAX_SIDE as usize {
+            return Err("la imagen copiada es demasiado grande".into());
+        }
         return image::RgbaImage::from_raw(i.width as u32, i.height as u32, i.bytes.into_owned()).map(image::DynamicImage::ImageRgba8).ok_or_else(|| "imagen dañada".into());
     }
     let file = cb.get().file_list().ok().and_then(|l| l.into_iter().next()).ok_or("no hay nada copiado que sea una imagen.")?;
     open_image(file)
+}
+
+/// Escribe a un temporal en la misma carpeta, lo baja a disco y lo renombra encima: un corte de luz deja el archivo
+/// viejo o el nuevo, nunca uno a medias.
+fn write_atomic(p: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    std::fs::create_dir_all(p.parent().unwrap())?;
+    let tmp = p.with_extension("json.tmp");
+    let mut f = std::fs::File::create(&tmp)?;
+    std::io::Write::write_all(&mut f, data)?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(&tmp, p)
 }
 
 fn load_saved() -> Saved { std::fs::read_to_string(saved_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default() }
@@ -233,11 +304,12 @@ impl App {
         let saved = load_saved();
         let mut app = Self {
             cat: Arc::new(Catalog::load()),
-            page: match std::env::var("BX_PAGE").as_deref() { Ok("scan") => Page::Scan, Ok("tweaks") => Page::Tweaks, Ok("debloat") => Page::Debloat, Ok("boost") => Page::Boost, Ok("backup") => Page::Backup, Ok("startup") => Page::Startup, _ => Page::Home },
+            page: match win::test_env("BX_PAGE").as_deref() { Some("scan") => Page::Scan, Some("tweaks") => Page::Tweaks, Some("debloat") => Page::Debloat, Some("boost") => Page::Boost, Some("backup") => Page::Backup, Some("startup") => Page::Startup, _ => Page::Home },
             startup: Vec::new(),
             update: None,
+            fake: sys::fake_kind(),
             updating: false,
-            tab: std::env::var("BX_TAB").unwrap_or_else(|_| "all".into()),
+            tab: win::test_env("BX_TAB").unwrap_or_else(|| "all".into()),
             query: String::new(),
             admin: engine::is_admin(),
             spec: None,
@@ -246,7 +318,7 @@ impl App {
             state: HashMap::new(),
             ps_ready: false,
             busy: HashSet::new(),
-            reboot_pending: std::env::var("BX_REBOOT").is_ok(), // BX_REBOOT=1: muestra el aviso, para capturas
+            reboot_pending: win::test_env("BX_REBOOT").is_some(), // BX_REBOOT=1: muestra el aviso, para capturas
             actions: vec![],
             confirm: None,
             confirm_skip: HashSet::new(),
@@ -288,8 +360,9 @@ impl App {
         if app.page == Page::Startup {
             app.startup = startup::scan();
         }
-        update::cleanup_old();
-        app.spawn(|tx, _, _| { let _ = tx.send(Msg::Update(update::check())); });
+        if app.fake.is_none() {
+            app.spawn(|tx, _, _| { let _ = tx.send(Msg::Update(update::check())); });
+        }
         app
     }
 
@@ -309,12 +382,12 @@ impl App {
     }
 
     fn save(&self) {
-        if std::env::var("BX_SHOT").is_ok() {
+        if win::test_env("BX_SHOT").is_some() {
             return; // las capturas de prueba no tocan las preferencias del usuario
         }
-        let p = saved_path();
-        let _ = std::fs::create_dir_all(p.parent().unwrap());
-        let _ = std::fs::write(p, serde_json::to_string(&self.saved).unwrap());
+        if let Err(e) = write_atomic(&saved_path(), serde_json::to_string(&self.saved).unwrap().as_bytes()) {
+            Log(Some(self.log_tx.clone())).put("warn", format!("No se pudieron guardar las preferencias: {e}"));
+        }
     }
 
     pub fn toast(&mut self, msg: impl Into<String>, color: Color32, secs: f32) { self.toasts.push((msg.into(), color, Instant::now(), secs)); }
@@ -345,6 +418,11 @@ impl App {
     }
 
     fn act(&mut self, a: Action) {
+        // En modo de prueba solo se puede mirar: ni tweaks, ni limpiezas, ni reinicios, ni actualizaciones, aunque la app tenga permisos de administrador.
+        if self.fake.is_some() && !matches!(a, Action::Go(..) | Action::Rescan | Action::RescanStartup) {
+            self.toast("Modo prueba: con hardware simulado no se aplica nada en la PC.", ACCENT, 3.5);
+            return;
+        }
         match a {
             Action::Go(page, tab) => {
                 if page != self.page {
@@ -434,7 +512,7 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
                 self.spawn(move |tx, _, _| { let _ = tx.send(Msg::Updated(update::install(&u))); });
             }
             Action::RebootNow => {
-                let _ = std::process::Command::new("shutdown.exe").args(["/r", "/t", "5"]).spawn();
+                let _ = win::secure_command(win::system32_exe("shutdown.exe")).args(["/r", "/t", "5"]).spawn();
                 self.toast("Reiniciando en 5 segundos…", ACCENT, 6.0);
             }
             Action::RunBoost(id) | Action::RunBoostNow(id) => {
@@ -448,7 +526,14 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
                     let _ = tx.send(Msg::Boosted { id, ok, out, err });
                 });
             }
+            // Un escaneo a la vez: F5 repetido lanzaba escaneos y lotes de PowerShell encima de los que seguían vivos.
+            // Mientras hay uno en curso no se lanza otro (Cancelar lo corta y libera).
+            Action::Rescan if !self.ps_ready || (self.spec.is_none() && self.scan_err.is_none()) => self.toast("Ya hay un escaneo en curso", ACCENT, 2.5),
             Action::Rescan => self.load_all(),
+            Action::Cancel => {
+                engine::cancel_all();
+                self.toast("Cancelando lo que está en curso…", ACCENT, 4.0);
+            }
             Action::CreateRestore => {
                 if self.need_admin() || self.busy.contains("rp") {
                     return;
@@ -550,7 +635,7 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
                 let log = engine::Log(Some(self.log_tx.clone()));
                 log.put("endok", "Versión nueva instalada: reabriendo");
                 App::save(self);
-                match std::env::current_exe().and_then(|exe| std::process::Command::new(exe).spawn()) {
+                match std::env::current_exe().and_then(|exe| win::secure_command(exe).spawn()) {
                     Ok(_) => std::process::exit(0),
                     Err(e) => {
                         self.updating = false;
@@ -832,6 +917,9 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
                     ui.ctx().copy_text(self.lines.iter().map(|l| format!("{} {}{}", l.t, plain(&l.lvl), l.msg)).collect::<Vec<_>>().join("\n"));
                     self.toast("Registro copiado al portapapeles", GREEN, 3.0);
                 }
+                if self.running > 0 && small(ui, "Cancelar").on_hover_text("Detener lo que está en curso").clicked() {
+                    self.actions.push(Action::Cancel);
+                }
                 if self.running > 0 {
                     let s = self.run_start.elapsed().as_secs();
                     ui.label(RichText::new(format!("{} {}:{:02}", ic::TIMER, s / 60, s % 60)).font(mono(12.5)).color(ACCENT));
@@ -987,17 +1075,17 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
     /// Captura para pruebas: BX_SHOT=archivo.png guarda la ventana cuando terminó de cargar y cierra.
     /// BX_PAGE / BX_TAB eligen la pantalla; BX_DEMO=1 corre "Vaciar caché DNS" para ver la consola.
     fn shot(&mut self, ctx: &egui::Context) {
-        let Ok(path) = std::env::var("BX_SHOT") else { return };
+        let Some(path) = win::test_env("BX_SHOT") else { return };
         ctx.request_repaint();
         let ready = self.spec.is_some() && self.ps_ready && (self.page != Page::Backup || self.restore.is_some());
-        if ready && self.frames == 0 && std::env::var("BX_DEMO").is_ok() {
+        if ready && self.frames == 0 && win::test_env("BX_DEMO").is_some() {
             self.admin = true;
             self.saved.console_open = true;
             self.actions.push(Action::RunBoost("dns".into()));
             self.frames = 1;
         }
         // BX_CONFIRM=1: muestra la confirmación de "Activar … de bajo riesgo" con todos los tweaks (no aplica nada).
-        if ready && self.frames == 0 && self.confirm.is_none() && std::env::var("BX_CONFIRM").is_ok() {
+        if ready && self.frames == 0 && self.confirm.is_none() && win::test_env("BX_CONFIRM").is_some() {
             let ids = self.cat.tweaks.iter().filter(|t| t.risk == "low").map(|t| t.id.clone()).collect::<Vec<_>>();
             self.confirm_skip.extend(ids.iter().take(2).cloned()); // para ver casillas destildadas
             self.confirm = Some(Confirm { text: format!("Se van a activar {} optimizaciones.\n\nConviene crear antes un punto de restauración (sección Backups).\n\n¿Continuar?", ids.len()), action: Action::ManyNow(ids) });
@@ -1057,6 +1145,13 @@ impl eframe::App for App {
         for a in std::mem::take(&mut self.actions) {
             self.act(a);
         }
+        // Primer cuadro dibujado: si veníamos de una actualización, quedó bien y se borra la copia vieja.
+        static FIRST_FRAME: std::sync::Once = std::sync::Once::new();
+        FIRST_FRAME.call_once(|| {
+            if !is_test_copy() {
+                update::confirm_ok()
+            }
+        });
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) { App::save(self); }

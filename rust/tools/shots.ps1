@@ -1,5 +1,6 @@
 # Saca una captura de cada pantalla de la app (solo lectura). Uso: tools\shots.ps1 <carpeta de salida> [debug|release]
 param([Parameter(Mandatory)] [string]$Out, [string]$Profile = 'debug')
+if ($Profile -ne 'debug') { throw 'Las capturas usan BX_SHOT/BX_PAGE, que el .exe de release ignora a propósito: usá el build debug.' }
 $exe = "M:\Github Things\botox-optimizer-rust\target\$Profile\botox-optimizer.exe"
 New-Item -ItemType Directory $Out -Force | Out-Null
 $shots = @(

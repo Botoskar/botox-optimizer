@@ -1,12 +1,10 @@
 //! Escáner de hardware nativo con WMI.
 //! Devuelve el mismo JSON que scan.js (el script de PowerShell), pero en una fracción de segundo.
 //! Solo lee: no cambia nada en la PC. Si WMI falla, la app cae al script de PowerShell.
-use crate::{engine::is_admin, reg};
+use crate::{engine::is_admin, reg, win};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::os::windows::process::CommandExt;
-use std::process::Command;
 use winreg::{enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE}, RegKey};
 use wmi::{Variant, WMIConnection};
 
@@ -153,12 +151,22 @@ fn power_plan() -> (String, String) {
 
 /// Versión del driver de NVIDIA como la informa nvidia-smi (el de WMI sale con otro formato).
 fn nvidia_driver() -> Option<String> {
-    let o = Command::new("nvidia-smi").args(["--query-gpu=driver_version", "--format=csv,noheader"]).creation_flags(0x0800_0000).output().ok()?;
+    let o = win::secure_command(win::nvidia_smi()?).args(["--query-gpu=driver_version", "--format=csv,noheader"]).output().ok()?;
     let line = String::from_utf8_lossy(&o.stdout).lines().next()?.trim().to_string();
     (o.status.success() && !line.is_empty()).then_some(line)
 }
 
 // ── Escaneo ──
+
+/// Chasis de escritorio según SMBIOS (Desktop, Tower, All in One, Mini PC, etc.).
+const DESKTOP_CHASSIS: [u64; 13] = [3, 4, 5, 6, 7, 13, 15, 16, 17, 23, 24, 35, 36];
+
+/// Notebook = tiene batería y el chasis no es de escritorio. Un UPS por USB aparece como batería en una PC de
+/// escritorio; con chasis desconocido manda la batería (igual que antes). Mismo criterio que scan.js.
+fn is_laptop(battery: bool, enclosures: &[Value]) -> bool {
+    let desktop = enclosures.iter().flat_map(|e| e["ChassisTypes"].as_array().cloned().unwrap_or_default()).any(|t| t.as_u64().is_some_and(|t| DESKTOP_CHASSIS.contains(&t)));
+    battery && !desktop
+}
 
 pub fn scan() -> Result<Value, String> {
     let cim = Some(WMIConnection::new().map_err(|e| format!("WMI no disponible: {e}"))?);
@@ -229,7 +237,8 @@ pub fn scan() -> Result<Value, String> {
         .collect();
 
     let (plan, plan_guid) = power_plan();
-    let sys_drive = std::env::var("SystemDrive").unwrap_or_default().trim_end_matches(':').to_string();
+    // La unidad de Windows sale de la API, no de %SystemDrive% (que cualquier proceso que lance la app puede cambiar).
+    let sys_drive = win::system_drive().trim_end_matches(':').to_string();
     let uptime = os["LastBootUpTime"].as_str().and_then(wmi_utc).map_or(0.0, |t| (chrono::Utc::now() - t).num_seconds() as f64 / 3600.0);
     let reserved = match reg_num(r"HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\ReserveManager", "ShippedWithReserves") { Some(v) if v == 0.0 => "Disabled", Some(_) => "Enabled", None => "" };
     let join = |a: &Value, b: &Value| format!("{} {}", text(a), text(b)).trim().to_string();
@@ -237,7 +246,7 @@ pub fn scan() -> Result<Value, String> {
     let mut spec = json!({
         "pc": std::env::var("COMPUTERNAME").unwrap_or_default(),
         "admin": is_admin(),
-        "laptop": !rows(&cim, "SELECT Name FROM Win32_Battery").is_empty(),
+        "laptop": is_laptop(!rows(&cim, "SELECT Name FROM Win32_Battery").is_empty(), &rows(&cim, "SELECT ChassisTypes FROM Win32_SystemEnclosure")),
         "cpu": { "name": text(&cpu["Name"]), "maker": cpu["Manufacturer"], "cores": cpu["NumberOfCores"], "threads": cpu["NumberOfLogicalProcessors"], "mhz": cpu["MaxClockSpeed"], "l3MB": rnd(num(&cpu["L3CacheSize"]) / 1024.0, 0) },
         "gpus": gpus,
         "ram": { "gb": rnd(num(&cs["TotalPhysicalMemory"]) / GB, 0), "modules": modules },
@@ -289,6 +298,17 @@ mod tests {
     #[test]
     fn letras_de_unidad() {
         assert_eq!((letter(&json!("C")), letter(&json!("\u{0}")), letter(&Value::Null), letter(&json!(""))), (Some("C".into()), None, None, None));
+    }
+
+    #[test]
+    fn un_ups_en_una_pc_de_escritorio_no_la_vuelve_notebook() {
+        let enc = |t: &[u64]| vec![json!({ "ChassisTypes": t })];
+        assert!(!is_laptop(true, &enc(&[3])), "Desktop con UPS");
+        assert!(!is_laptop(true, &enc(&[7])), "Tower con UPS");
+        assert!(is_laptop(true, &enc(&[10])), "Notebook");
+        assert!(is_laptop(true, &enc(&[2])), "chasis desconocido: manda la batería");
+        assert!(is_laptop(true, &[]), "sin datos de chasis: manda la batería");
+        assert!(!is_laptop(false, &enc(&[10])), "sin batería no cuenta como notebook (igual que antes)");
     }
 
     #[test]

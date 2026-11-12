@@ -20,7 +20,8 @@ const PRELUDE = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
-$BK = "$env:ProgramData\BotoxOptimizer\backup"
+$BK = [Environment]::GetFolderPath('CommonApplicationData') + '\BotoxOptimizer\backup'
+$script:BKREADY = $false
 
 # Consola de actividad: cada línea "LOG:nivel|mensaje" se muestra en vivo en la app.
 # Va directo a la salida estándar, sin pasar por el pipeline, para no mezclarse con lo que devuelven las funciones.
@@ -51,32 +52,74 @@ function Del-RegVal($p, $n) {
   $o = Get-RegVal $p $n
   if ($o.e) { Remove-ItemProperty -LiteralPath $p -Name $n -ErrorAction SilentlyContinue; Log "$(Short $p)\$($n): $(Fmt $o) → (eliminado)" }
 }
+# winget por ruta absoluta dentro de Program Files\WindowsApps (protegida). El alias de %LOCALAPPDATA%\Microsoft\WindowsApps
+# está en una carpeta del usuario: un winget.exe falso ahí correría como administrador.
+function WingetExe {
+  $w = Get-AppxPackage Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue | Sort-Object Version -Descending |
+    ForEach-Object { Join-Path $_.InstallLocation 'winget.exe' } | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+  if (!$w) { throw 'No encontré winget (Instalador de aplicaciones de Microsoft). Instalá OneDrive desde la Microsoft Store.' }
+  $w
+}
+function MsSigned($f) { $s = Get-AuthenticodeSignature -LiteralPath $f; $s.Status -eq 'Valid' -and $s.SignerCertificate.Subject -match 'O=Microsoft Corporation' }
 function StopSvc($n) { $s = Get-Service $n -ErrorAction SilentlyContinue; if ($s -and $s.Status -eq 'Running') { Stop-Service $n -Force -ErrorAction SilentlyContinue; Log "Servicio $($n): detenido" } }
 function Skip($x) { $x.Count -gt 5 -and $x[5] -and !(Test-Path -LiteralPath $x[0]) }
+# Un junction/symlink, o algo que creó un usuario normal (ProgramData lo deja), no sirve para respaldos que se aplican
+# como administrador: su dueño siempre puede volver a darse permisos. Solo vale lo que es de SYSTEM o Administradores.
+function BkGuard($p) {
+  $it = Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+  if (!$it) { return }
+  if ($it.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "$p es un enlace/reparse point: no se usa para respaldos" }
+  $o = (Get-Acl -LiteralPath $p).GetOwner([Security.Principal.SecurityIdentifier]).Value
+  if ($o -notin 'S-1-5-18', 'S-1-5-32-544') { throw "$p no pertenece a SYSTEM ni a Administradores (lo creó otro usuario): no se usa por seguridad" }
+}
 function Save-Bk($id, $obj) {
   $f = "$BK\$id.json"
-  if (Test-Path $f) { Log "Ya hay un respaldo de '$id': se conservan los valores originales"; return }
-  New-Item -ItemType Directory $BK -Force | Out-Null
-  ConvertTo-Json -InputObject $obj -Depth 4 | Set-Content $f -Encoding UTF8
+  BkGuard (Split-Path $BK -Parent); BkGuard $BK; BkGuard $f
+  if (Test-Path -LiteralPath $f) { Log "Ya hay un respaldo de '$id': se conservan los valores originales"; return }
+  if (-not $script:BKREADY) {
+    New-Item -ItemType Directory $BK -Force | Out-Null
+    BkGuard (Split-Path $BK -Parent); BkGuard $BK
+    # Solo SYSTEM y Administradores. Si icacls falla, no se escribe el respaldo (igual que en Rust).
+    & ([Environment]::SystemDirectory + '\icacls.exe') $BK /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /T /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "no se pudieron endurecer los permisos de $BK (icacls devolvió $LASTEXITCODE)" }
+    $script:BKREADY = $true
+  }
+  ConvertTo-Json -InputObject $obj -Depth 4 | Set-Content -LiteralPath $f -Encoding UTF8
   Log "Respaldo guardado: $f ($(@($obj).Count) valores)"
 }
-function Load-Bk($id) { $f = "$BK\$id.json"; if (Test-Path $f) { $o = Get-Content $f -Raw | ConvertFrom-Json; Remove-Item $f; Log "Restaurando desde el respaldo $f"; return ,$o } }
+function Read-Bk($id) { $f = "$BK\$id.json"; BkGuard $BK; BkGuard $f; if (Test-Path -LiteralPath $f) { $o = Get-Content -LiteralPath $f -Raw | ConvertFrom-Json; Log "Restaurando desde el respaldo $f"; return ,$o } }
+function Remove-Bk($id) { $f = "$BK\$id.json"; if (Test-Path $f) { Remove-Item $f -Force -ErrorAction SilentlyContinue } }
 
 function RegApply($id, $L) {
   if ($L.Count -eq 0) { return }
   Save-Bk $id @(foreach ($x in $L) { if (!(Skip $x)) { $c = Get-RegVal $x[0] $x[1]; [pscustomobject]@{ p = $x[0]; n = $x[1]; e = $c.e; v = $c.v; t = $c.t } } })
   foreach ($x in $L) { if (!(Skip $x)) { Set-RegVal $x[0] $x[1] $x[2] $x[3] } }
 }
+function SvcName($p) { if ($p -match '\\CurrentControlSet\\Services\\([^\\]+)$') { $Matches[1] } }
+function StartSvc($n) { $s = Get-Service -Name $n -ErrorAction SilentlyContinue; if ($s -and $s.Status -ne 'Running') { try { Start-Service $n -ErrorAction Stop; Log "Servicio $($n): iniciado" } catch { Log "Servicio $($n): no se pudo iniciar ($($_.Exception.Message))" 'warn' } } }
 function RegRevert($id, $L) {
-  $b = Load-Bk $id; $done = @{}
+  $b = Read-Bk $id; $done = @{}; $allowed = @{}
+  # Solo se restauran claves del catálogo de este ajuste: un respaldo manipulado no puede escribir otra cosa.
+  foreach ($x in $L) { if (!(Skip $x)) { $allowed["$($x[0])|$($x[1])".ToLower()] = 1 } }
   if ($null -eq $b -and $L.Count) { Log 'Sin respaldo: se vuelve a los valores por defecto de Windows' 'warn' }
-  if ($null -ne $b) { foreach ($i in $b) { $done["$($i.p)|$($i.n)"] = 1; if ($i.e) { Set-RegVal $i.p $i.n $i.v $i.t } else { Del-RegVal $i.p $i.n } } }
+  if ($null -ne $b) { foreach ($i in $b) {
+    $key = "$($i.p)|$($i.n)".ToLower()
+    if (!$allowed.ContainsKey($key)) { Log "El respaldo trae una entrada ajena al ajuste ($($i.p)\$($i.n)): se saltea" 'warn'; continue }
+    if ($i.e -isnot [bool]) { Log "El respaldo trae una entrada sin estado: se saltea" 'warn'; continue }
+    if ($i.e -and $i.t -notin 'DWord','QWord','String','ExpandString','MultiString','Binary') { Log "El respaldo trae un tipo de valor no soportado ($($i.t)): se saltea" 'warn'; continue }
+    $done[$key] = 1
+    if ($i.e) { Set-RegVal $i.p $i.n $i.v $i.t } else { Del-RegVal $i.p $i.n }
+  } }
   # Lo que no está en el respaldo (respaldo viejo o incompleto) vuelve al valor por defecto de Windows.
-  foreach ($x in $L) { if (!(Skip $x) -and !$done["$($x[0])|$($x[1])"]) { if ($null -eq $x[4]) { Del-RegVal $x[0] $x[1] } else { Set-RegVal $x[0] $x[1] $x[4] $x[3] } } }
+  foreach ($x in $L) { if (!(Skip $x) -and !$done["$($x[0])|$($x[1])".ToLower()]) { if ($null -eq $x[4]) { Del-RegVal $x[0] $x[1] } else { Set-RegVal $x[0] $x[1] $x[4] $x[3] } } }
+  # Un servicio que vuelve a Automático tiene que quedar corriendo; cambiar el Start solo no alcanza.
+  if ($null -ne $b) { foreach ($i in $b) { if ($allowed.ContainsKey("$($i.p)|$($i.n)".ToLower()) -and $i.n -eq 'Start' -and $i.e -and [int]$i.v -eq 2) { $s = SvcName $i.p; if ($s) { StartSvc $s } } } }
+  Remove-Bk $id
 }
 function RegCheck($L) {
-  foreach ($x in $L) { if (!(Skip $x)) { $c = Get-RegVal $x[0] $x[1]; if (!$c.e -or "$($c.v)" -ne "$($x[2])") { return $false } } }
-  $true
+  $n = 0
+  foreach ($x in $L) { if (!(Skip $x)) { $n++; $c = Get-RegVal $x[0] $x[1]; if (!$c.e -or "$($c.v)" -ne "$($x[2])") { return $false } } }
+  $n -gt 0
 }
 
 # Planes de energía: lee el valor AC actual de un ajuste (independiente del idioma).
@@ -88,7 +131,8 @@ $PWN = @{ '48e6b7a6' = 'Suspensión selectiva USB'; 'ee12f906' = 'Ahorro de ener
   'be337238' = 'Modo boost del procesador'; '893dee8e' = 'Estado mínimo del procesador (%)'; '6738e2c4' = 'Apagar disco tras (s)' }
 function PwrSet($sub, $set, $v) {
   $o = PwrGet $sub $set
-  powercfg /setacvalueindex SCHEME_CURRENT $sub $set $v; powercfg /setdcvalueindex SCHEME_CURRENT $sub $set $v
+  powercfg /setacvalueindex SCHEME_CURRENT $sub $set $v; if ($LASTEXITCODE) { throw "powercfg no pudo cambiar $set (código $LASTEXITCODE)" }
+  powercfg /setdcvalueindex SCHEME_CURRENT $sub $set $v; if ($LASTEXITCODE) { throw "powercfg no pudo cambiar $set en batería (código $LASTEXITCODE)" }
   $nm = $PWN[$set.Substring(0, 8)]; if (!$nm) { $nm = $set }
   Log "Plan de energía · $($nm): $o → $v"
 }
@@ -98,12 +142,15 @@ function PwrApply($id, $P) {
   powercfg /setactive SCHEME_CURRENT
 }
 function PwrRevert($id, $P) {
-  $b = Load-Bk $id
-  if ($null -ne $b) { foreach ($i in $b) { if ($null -ne $i.v) { PwrSet $i.s $i.k $i.v } } } else { foreach ($x in $P) { PwrSet $x[0] $x[1] $x[3] } }
+  $b = Read-Bk $id; $allowed = @{}
+  foreach ($x in $P) { $allowed["$($x[0])|$($x[1])".ToLower()] = 1 }
+  if ($null -ne $b) { foreach ($i in $b) { if (!$allowed.ContainsKey("$($i.s)|$($i.k)".ToLower())) { Log 'El respaldo trae un ajuste de energía ajeno: se saltea' 'warn'; continue }; if ($null -ne $i.v) { PwrSet $i.s $i.k $i.v } } } else { foreach ($x in $P) { PwrSet $x[0] $x[1] $x[3] } }
   powercfg /setactive SCHEME_CURRENT
+  Remove-Bk $id
 }
 function PwrSetAC($sub, $set, $v) {
   $o = PwrGet $sub $set; powercfg /setacvalueindex SCHEME_CURRENT $sub $set $v
+  if ($LASTEXITCODE) { throw "powercfg no pudo cambiar $set (código $LASTEXITCODE)" }
   $nm = $PWN[$set.Substring(0, 8)]; if (!$nm) { $nm = $set }
   Log "Plan de energía (enchufada) · $($nm): $o → $v"
 }
@@ -113,9 +160,11 @@ function PwrApplyAC($id, $P) {
   powercfg /setactive SCHEME_CURRENT
 }
 function PwrRevertAC($id, $P) {
-  $b = Load-Bk $id
-  if ($null -ne $b) { foreach ($i in $b) { if ($null -ne $i.v) { PwrSetAC $i.s $i.k $i.v } } } else { foreach ($x in $P) { PwrSetAC $x[0] $x[1] $x[3] } }
+  $b = Read-Bk $id; $allowed = @{}
+  foreach ($x in $P) { $allowed["$($x[0])|$($x[1])".ToLower()] = 1 }
+  if ($null -ne $b) { foreach ($i in $b) { if (!$allowed.ContainsKey("$($i.s)|$($i.k)".ToLower())) { Log 'El respaldo trae un ajuste de energía ajeno: se saltea' 'warn'; continue }; if ($null -ne $i.v) { PwrSetAC $i.s $i.k $i.v } } } else { foreach ($x in $P) { PwrSetAC $x[0] $x[1] $x[3] } }
   powercfg /setactive SCHEME_CURRENT
+  Remove-Bk $id
 }
 function PwrCheck($P) { foreach ($x in $P) { if ((PwrGet $x[0] $x[1]) -ne $x[2]) { return $false } }; $true }
 
@@ -128,7 +177,7 @@ function TaskSet($pats, $on) {
     try { if ($on) { $t | Enable-ScheduledTask | Out-Null; Log "Tarea $($n): habilitada" } else { $t | Disable-ScheduledTask | Out-Null; Log "Tarea $($n): deshabilitada" } }
     catch { Log "Tarea $($n): protegida por Windows, se saltea" 'warn' } }
 }
-function TaskCheck($pats) { @(FindTasks $pats | Where-Object { $_.State -ne 'Disabled' }).Count -eq 0 }
+function TaskCheck($pats) { $f = @(FindTasks $pats); $f.Count -gt 0 -and @($f | Where-Object { $_.State -ne 'Disabled' }).Count -eq 0 }
 function Apps { if ($null -eq $script:APPS) { $script:APPS = @(Get-AppxPackage) }; $script:APPS }
 function AppxFind($pats) { Apps | Where-Object { $n = $_.Name; @($pats | Where-Object { $n -like $_ }).Count -gt 0 } }
 function AppxRemove($pats) {
@@ -164,13 +213,19 @@ function NicApply($id, $kv) {
   foreach ($c in $cur) { Set-NetAdapterAdvancedProperty -Name $c.a -RegistryKeyword $c.k -RegistryValue $kv[$c.k] -NoRestart; Log "Placa $($c.a) · $($c.k): $($c.v) → $($kv[$c.k])" }
   NicRestart @($cur.a | Select-Object -Unique); WaitNics $n
 }
-function NicRevert($id) {
-  $b = Load-Bk "$id-nic"; if ($null -eq $b -or !@($b).Count) { return }; $n = @(Nics).Count
-  foreach ($c in $b) { Set-NetAdapterAdvancedProperty -Name $c.a -RegistryKeyword $c.k -RegistryValue $c.v -NoRestart -ErrorAction SilentlyContinue; Log "Placa $($c.a) · $($c.k): → $($c.v)" }
+function NicRevert($id, $kv) {
+  $b = Read-Bk "$id-nic"; if ($null -eq $b -or !@($b).Count) { Remove-Bk "$id-nic"; return }; $n = @(Nics).Count
+  $fail = 0
+  foreach ($c in $b) { if (!$kv.ContainsKey($c.k)) { Log "El respaldo trae una propiedad de red ajena ($($c.k)): se saltea" 'warn'; continue }
+    try { Set-NetAdapterAdvancedProperty -Name $c.a -RegistryKeyword $c.k -RegistryValue $c.v -NoRestart -ErrorAction Stop; Log "Placa $($c.a) · $($c.k): → $($c.v)" }
+    catch { $fail++; Log "Placa $($c.a) · $($c.k): no se pudo restaurar ($($_.Exception.Message))" 'warn' } }
   NicRestart @($b.a | Select-Object -Unique); WaitNics $n
+  # Si algo no volvió, el respaldo queda para reintentar: borrarlo perdería los valores originales.
+  if ($fail) { throw "$fail propiedades de red no se pudieron restaurar; el respaldo se conserva para reintentar" }
+  Remove-Bk "$id-nic"
 }
 # Cada driver expone distintas propiedades: solo se exige que las que existen tengan el valor buscado.
-function NicCheck($kv) { @(NicProps $kv | Where-Object { $_.v -ne [string]$kv[$_.k] }).Count -eq 0 }
+function NicCheck($kv) { $p = @(NicProps $kv); $p.Count -gt 0 -and @($p | Where-Object { $_.v -ne [string]$kv[$_.k] }).Count -eq 0 }
 `;
 
 const P_SUB = '54533251-82be-4824-96c1-47b60b740d00'; // procesador
@@ -327,7 +382,7 @@ const TWEAKS = [
   { id: 'dns', cat: 'net', name: 'DNS rápido (Cloudflare 1.1.1.1)',
     desc: 'Usa 1.1.1.1 y 1.0.0.1 en tus adaptadores activos. Resoluciones DNS más rápidas al entrar a servidores y launchers.',
     apply: String.raw`$b=@(foreach($a in Nics){ $g=(Get-NetAdapter -Name $a.Name).InterfaceGuid; [pscustomobject]@{ i=$a.ifIndex; ns=[string](Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$g").NameServer } }); Save-Bk 'dns' $b; foreach($a in Nics){ Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -ServerAddresses '1.1.1.1','1.0.0.1' }; Clear-DnsClientCache`,
-    revert: String.raw`$b=Load-Bk 'dns'; if($null -eq $b){ foreach($a in Nics){ Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -ResetServerAddresses } } else { foreach($x in $b){ if($x.ns){ Set-DnsClientServerAddress -InterfaceIndex $x.i -ServerAddresses ($x.ns -split '[ ,]+') } else { Set-DnsClientServerAddress -InterfaceIndex $x.i -ResetServerAddresses } } }; Clear-DnsClientCache`,
+    revert: String.raw`$b=Read-Bk 'dns'; if($null -eq $b){ foreach($a in Nics){ Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -ResetServerAddresses } } else { foreach($x in $b){ if($x.ns){ Set-DnsClientServerAddress -InterfaceIndex $x.i -ServerAddresses ($x.ns -split '[ ,]+') } else { Set-DnsClientServerAddress -InterfaceIndex $x.i -ResetServerAddresses } } }; Remove-Bk 'dns'; Clear-DnsClientCache`,
     // @() obligatorio: con un solo adaptador PowerShell devuelve un CimInstance y su .Count queda vacío.
     pre: '$n=@(Nics)', check: String.raw`$n.Count -gt 0 -and @($n | Where-Object { (Get-DnsClientServerAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4).ServerAddresses[0] -ne '1.1.1.1' }).Count -eq 0` },
 
@@ -419,7 +474,7 @@ const TWEAKS = [
   // shortcut: solo busca los juegos en las rutas de instalación habituales, ampliar si hace falta
   { id: 'lap-dgpu', cat: 'games', name: 'Usar la GPU dedicada en los juegos', rec: s => s.laptop,
     desc: 'En notebooks y PCs con dos GPU, Windows a veces corre el juego en la integrada. Esto fuerza la GPU de alto rendimiento para Valorant, CS2, Fortnite y AION 2 si están instalados.',
-    L: String.raw`@(foreach($d in @(Get-PSDrive -PSProvider FileSystem | ForEach-Object Root)){ foreach($r in @('Riot Games\VALORANT\live\ShooterGame\Binaries\Win64\VALORANT-Win64-Shipping.exe','Epic Games\Fortnite\FortniteGame\Binaries\Win64\FortniteClient-Win64-Shipping.exe','Program Files\Epic Games\Fortnite\FortniteGame\Binaries\Win64\FortniteClient-Win64-Shipping.exe','SteamLibrary\steamapps\common\Counter-Strike Global Offensive\game\bin\win64\cs2.exe','Steam\steamapps\common\Counter-Strike Global Offensive\game\bin\win64\cs2.exe','Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive\game\bin\win64\cs2.exe','SteamLibrary\steamapps\common\AION2\Aion2\Binaries\Win64\AION2.exe','Steam\steamapps\common\AION2\Aion2\Binaries\Win64\AION2.exe','Program Files (x86)Steam\steamapps\common\AION2\Aion2\Binaries\Win64\AION2.exe')){ $f=$d+$r; if(Test-Path -LiteralPath $f){ ,@('HKCU:\Software\Microsoft\DirectX\UserGpuPreferences',$f,'GpuPreference=2;','String',$null) } } })`,
+    L: String.raw`@(foreach($d in @([IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq 'Fixed' -and $_.IsReady } | ForEach-Object { $_.RootDirectory.FullName })){ foreach($r in @('Riot Games\VALORANT\live\ShooterGame\Binaries\Win64\VALORANT-Win64-Shipping.exe','Epic Games\Fortnite\FortniteGame\Binaries\Win64\FortniteClient-Win64-Shipping.exe','Program Files\Epic Games\Fortnite\FortniteGame\Binaries\Win64\FortniteClient-Win64-Shipping.exe','SteamLibrary\steamapps\common\Counter-Strike Global Offensive\game\bin\win64\cs2.exe','Steam\steamapps\common\Counter-Strike Global Offensive\game\bin\win64\cs2.exe','Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive\game\bin\win64\cs2.exe','SteamLibrary\steamapps\common\AION2\Aion2\Binaries\Win64\AION2.exe','Steam\steamapps\common\AION2\Aion2\Binaries\Win64\AION2.exe','Program Files (x86)\Steam\steamapps\common\AION2\Aion2\Binaries\Win64\AION2.exe')){ $f=$d+$r; if(Test-Path -LiteralPath $f){ ,@('HKCU:\Software\Microsoft\DirectX\UserGpuPreferences',$f,'GpuPreference=2;','String',$null) } } })`,
     apply: `if(-not @($L).Count){ Log 'No encontré Valorant, CS2, Fortnite ni AION 2 en las rutas habituales' 'warn' }`,
     check: '@($L).Count -gt 0' },
 
@@ -546,8 +601,9 @@ const TWEAKS = [
   })),
   { id: 'onedrive', cat: 'debloat', name: 'Desinstalar OneDrive', risk: 'med', debloat: true,
     desc: 'Quita OneDrive y su sincronización de fondo. Tus archivos de la carpeta OneDrive no se borran. Revertir lo reinstala con winget.',
-    apply: String.raw`Get-Process OneDrive -ErrorAction SilentlyContinue | Stop-Process -Force; $u=@("$env:LOCALAPPDATA\Microsoft\OneDrive\OneDriveSetup.exe","$env:SystemRoot\System32\OneDriveSetup.exe","$env:SystemRoot\SysWOW64\OneDriveSetup.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1; if($u){ Start-Process $u '/uninstall' -Wait } else { winget uninstall --id Microsoft.OneDrive -e --silent | Out-Null }`,
-    revert: 'winget install --id Microsoft.OneDrive -e --silent --accept-source-agreements --accept-package-agreements | Out-Null',
+    // La copia del perfil está en una carpeta que el usuario puede escribir: elevada, solo si la firmó Microsoft.
+    apply: String.raw`Get-Process OneDrive -ErrorAction SilentlyContinue | Stop-Process -Force; $u=@("$env:SystemRoot\System32\OneDriveSetup.exe","$env:SystemRoot\SysWOW64\OneDriveSetup.exe","$env:LOCALAPPDATA\Microsoft\OneDrive\OneDriveSetup.exe") | Where-Object { (Test-Path -LiteralPath $_) -and (MsSigned $_) } | Select-Object -First 1; if($u){ Start-Process $u '/uninstall' -Wait } else { & (WingetExe) uninstall --id Microsoft.OneDrive -e --silent | Out-Null }`,
+    revert: '& (WingetExe) install --id Microsoft.OneDrive -e --silent --accept-source-agreements --accept-package-agreements | Out-Null',
     check: String.raw`-not (Test-Path "$env:LOCALAPPDATA\Microsoft\OneDrive\OneDrive.exe") -and -not (Test-Path "$env:ProgramFiles\Microsoft OneDrive\OneDrive.exe")` },
   { id: 'edgebg', cat: 'debloat', name: 'Edge sin arranque ni segundo plano', rec: () => true,
     desc: 'Edge deja de precargarse al iniciar Windows y de quedar abierto después de cerrarlo.',
@@ -577,9 +633,11 @@ function applyPS(t) {
   return p.filter(Boolean).join('\n');
 }
 function revertPS(t) {
-  const p = [t.pre || '', `$L=${lExpr(t)}; RegRevert '${t.id}' $L`];
+  const p = [t.pre || ''];
+  // RegRevert solo si el tweak tiene registro propio: si no, borraría el respaldo de un revert personalizado (dns).
+  if (t.reg || t.L) p.push(`$L=${lExpr(t)}; RegRevert '${t.id}' $L`);
   if (t.pwr) p.push(`PwrRevert${t.ac ? 'AC' : ''} '${t.id}' ${pwrList(t)}`);
-  if (t.nic) p.push(`NicRevert '${t.id}'`);
+  if (t.nic) p.push(`NicRevert '${t.id}' ${nicHash(t)}`);
   if (t.revert) p.push(echo(t.revert));
   return p.filter(Boolean).join('\n');
 }
@@ -627,9 +685,11 @@ const BOOSTS = [
     ps: CLEAN + 'Clean @("$env:LOCALAPPDATA\\CrashDumps", "$env:SystemRoot\\Minidump", "$env:ProgramData\\Microsoft\\Windows\\WER\\ReportArchive", "$env:ProgramData\\Microsoft\\Windows\\WER\\ReportQueue")' },
   { id: 'wucache', name: 'Limpiar caché de Windows Update', icon: '📦', every: 'Cada mes',
     desc: 'Borra instaladores de actualizaciones ya descargadas. Útil cuando C: está lleno.',
+    // try/finally: si la limpieza falla, los servicios se vuelven a levantar igual.
     ps: CLEAN + String.raw`Log 'Deteniendo Windows Update y BITS para poder borrar…'; Stop-Service wuauserv,bits -Force -ErrorAction SilentlyContinue
-$m = Clean @("$env:SystemRoot\SoftwareDistribution\Download")
-Start-Service wuauserv,bits -ErrorAction SilentlyContinue; Log 'Windows Update y BITS reanudados' 'ok'; $m` },
+try { $m = Clean @("$env:SystemRoot\SoftwareDistribution\Download") }
+finally { Start-Service wuauserv,bits -ErrorAction SilentlyContinue; Log 'Windows Update y BITS reanudados' 'ok' }
+$m` },
   { id: 'recent', name: 'Limpiar documentos recientes', icon: '📄', every: 'Cuando quieras',
     desc: 'Vacía la lista de archivos recientes del Explorador y de Acceso rápido.',
     ps: CLEAN + 'Clean @("$env:APPDATA\\Microsoft\\Windows\\Recent") "*.lnk"' },
@@ -647,9 +707,10 @@ foreach ($x in $v) { $d = "$($x.DriveLetter):"; $t0 = Get-Date
   { id: 'dism', name: 'Limpiar componentes de Windows', icon: '🧩', every: 'Cada 2-3 meses',
     desc: 'DISM StartComponentCleanup: borra versiones viejas de componentes en WinSxS. Puede tardar 5-15 minutos.',
     ps: String.raw`Log 'DISM StartComponentCleanup en curso: suele tardar 5-15 minutos. El contador de la consola muestra que sigue trabajando.'
-$a = (Get-PSDrive C).Free; Dism.exe /Online /Cleanup-Image /StartComponentCleanup /Quiet | Out-Null; $c = $LASTEXITCODE
+$sd = [IO.Path]::GetPathRoot([Environment]::SystemDirectory).Substring(0, 1)  # unidad de Windows (no siempre C:)
+$a = (Get-PSDrive $sd).Free; & ([Environment]::SystemDirectory + '\Dism.exe') /Online /Cleanup-Image /StartComponentCleanup /Quiet | Out-Null; $c = $LASTEXITCODE
 Log "DISM terminó (código $c)" $(if ($c) { 'warn' } else { 'ok' })
-'Liberados {0:N0} MB en C:' -f (((Get-PSDrive C).Free - $a) / 1MB)` },
+'Liberados {0:N0} MB en {1}:' -f (((Get-PSDrive $sd).Free - $a) / 1MB), $sd` },
 ];
 
 module.exports = { TWEAKS, CATS, BOOSTS, PRELUDE, applyPS, revertPS, checkPS, checkAllPS };
