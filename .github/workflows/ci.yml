@@ -15,7 +15,7 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # El proyecto compila con la variante GNU de Rust: build.rs usa windres y el enlazado usa gcc/dlltool de MinGW.
       - uses: msys2/setup-msys2@v2
@@ -71,7 +71,7 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit
