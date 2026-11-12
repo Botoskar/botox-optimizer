@@ -16,7 +16,7 @@ arboard = "3"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-winreg = "0.55"
+winreg = "0.56"
 
 [build-dependencies]
 embed-manifest = "1.4"
