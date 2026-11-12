@@ -1,6 +1,6 @@
 [package]
 name = "botox-optimizer"
-version = "2.3.1"
+version = "2.4.0"
 edition = "2021"
 # Versión con la que se compila y testea (CI usa exactamente 1.99.1, variante GNU). Ver README > Compilar.
 rust-version = "1.99"

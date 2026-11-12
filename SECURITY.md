@@ -2,7 +2,7 @@
 
 ## Versiones con soporte
 
-Solo la última versión publicada en https://github.com/Botoskar/botox-optimizer-releases recibe correcciones. La app se actualiza sola; las anteriores a 2.1.0 no saben hacerlo.
+Solo la última versión publicada en https://github.com/Botoskar/botox-optimizer/releases recibe correcciones. La app se actualiza sola; las anteriores a 2.1.0 no saben hacerlo, y las de 2.1.0 a 2.3.1 buscan en el repo viejo `botox-optimizer-releases`.
 
 ## Cómo reportar una vulnerabilidad
 

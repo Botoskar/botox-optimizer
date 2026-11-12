@@ -138,6 +138,12 @@ fn ensure_dir() -> Result<(), String> {
     Ok(())
 }
 
+/// Con la app elevada, repara los permisos de una carpeta de respaldos que ya existe (versiones anteriores dejaban los
+/// archivos sin ningún permiso: ver `harden_dir`). No crea la carpeta si no está.
+pub fn repair_backups() -> Result<(), String> {
+    if crate::engine::is_admin() && backup_dir().exists() { ensure_dir() } else { Ok(()) }
+}
+
 /// Guarda el respaldo solo si no existe (nunca pisa los valores originales). Devuelve true si lo creó.
 pub fn save_backup(id: &str, items: &Value) -> Result<bool, String> {
     let f = backup_path(id);

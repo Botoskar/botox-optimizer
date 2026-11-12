@@ -6,9 +6,15 @@ Optimizador de FPS y latencia para PC gamer con Windows 10/11. App nativa en Rus
 
 - `rust/`: la app. El código está en `rust/src`.
 - `tweaks.js` y `scan.js`: el catálogo de tweaks y el script del escáner. La app no los lee directo: `node rust/tools/export-catalog.js` los convierte en `rust/assets/catalog.json`.
-- Las versiones listas para usar se publican en un repo público aparte, solo con el `.exe`: https://github.com/Botoskar/botox-optimizer-releases
+- Las versiones listas para usar se publican en las Releases de este repo, solo con el `.exe`: https://github.com/Botoskar/botox-optimizer/releases
 - **Visibilidad:** este repositorio de código (`Botoskar/botox-optimizer`) es **público a propósito**. No tiene claves ni secretos, y no tiene que tenerlos: la clave privada de firma nunca se sube (ver "Sacar una versión nueva"). Sin `LICENSE`, que el código se vea no da permiso para reutilizarlo; ver `LICENSE-PROPUESTA.md`.
 - `THIRD-PARTY-NOTICES.md`: licencias de lo que va dentro del `.exe` (Poppins bajo SIL OFL 1.1 y las dependencias). `SECURITY.md`: cómo reportar vulnerabilidades. `docs/DISENO-MOTOR-ELEVADO.md`: propuesta para separar la interfaz del motor elevado.
+
+## Si algo sale mal
+
+- **Revertir todo:** en Backups, o con **Ctrl+Shift+R** desde cualquier sección. Pide confirmación antes de tocar nada.
+- **Modo seguro:** `"Botox Optimizer.exe" --safe` abre la app mostrando solo Backups. Ahí se puede revertir, crear un punto de restauración y reiniciar, pero no aplicar nada. En Backups hay un botón para copiar el comando.
+- **Sin ventana:** `"Botox Optimizer.exe" --revert-all` muestra qué revertiría, sin tocar nada. `--revert-all --yes` lo revierte y avisa el resultado en una ventanita. No corre si la app está abierta ni en modo prueba.
 
 ## Compilar
 
@@ -17,7 +23,7 @@ El toolchain (Rust + mingw64) está en `M:\Github Things\botox-optimizer-rust` y
 ```bash
 cd rust
 cmd //c ".\\cargo.cmd build"                         # desarrollo, sin admin (modo solo lectura)
-cmd //c ".\\cargo.cmd test"                          # 49 tests (nunca los corras elevado)
+cmd //c ".\\cargo.cmd test"                          # 63 tests (nunca los corras elevado)
 BX_ADMIN=1 cmd //c ".\\cargo.cmd build --release"    # versión para usar: pide administrador
 powershell -NoProfile -File tools\parse-ps.ps1       # sintaxis de los 113 scripts del catálogo, sin ejecutarlos
 ```
@@ -30,7 +36,7 @@ Si la app está abierta, el `.exe` queda bloqueado: por eso se usa una copia en 
 
 ## Sacar una versión nueva
 
-La app busca sola, al abrir, la última versión en `botox-optimizer-releases` y ofrece un botón "Actualizar". No lleva ninguna clave: el repo de versiones es público y solo trae el `.exe`; el código fuente está en este repositorio.
+La app busca sola, al abrir, la última versión en las Releases de este repositorio y ofrece un botón "Actualizar". No lleva ninguna clave: el repo es público y cada versión solo adjunta el `.exe`. Las versiones 2.1.0 a 2.3.1 buscaban en el repo viejo `botox-optimizer-releases`.
 
 ### Certificado de firma (autofirmado, gratis)
 
@@ -54,7 +60,7 @@ Para cambiar de certificado: agregá el nuevo thumbprint a la lista en una versi
 1. Subí la versión en `rust/Cargo.toml` y compilá la versión con admin (arriba). Usá siempre tres números, `X.Y.Z`: una versión de cuatro (`1.2.3.4`) no se reconoce y la actualización no se ofrece.
 2. Copiá el `.exe` como **`BotoxOptimizer.exe`** (sin espacios: la app busca ese nombre).
 3. Firmalo: `powershell -NoProfile -File rust\tools\sign.ps1 <ruta>\BotoxOptimizer.exe`. Firma con timestamp, comprueba que el firmante sea el certificado fijado y muestra el `SHA256` (sacado después de firmar, porque la firma cambia el archivo).
-4. En `botox-optimizer-releases` > Releases > Draft a new release:
+4. En este repo > Releases > Draft a new release:
    - Tag `vX.Y.Z` (igual a la versión de `Cargo.toml`).
    - En la descripción, una línea `SHA256: <hash>`. La app no instala si el hash no coincide (también se compara con el digest del asset que publica GitHub).
    - Adjuntá `BotoxOptimizer.exe` y publicá (no como pre-release: la app mira solo la última publicada).

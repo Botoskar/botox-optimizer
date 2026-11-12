@@ -119,7 +119,8 @@ function RegRevert($id, $L) {
 function RegCheck($L) {
   $n = 0
   foreach ($x in $L) { if (!(Skip $x)) { $n++; $c = Get-RegVal $x[0] $x[1]; if (!$c.e -or "$($c.v)" -ne "$($x[2])") { return $false } } }
-  $n -gt 0
+  # Sin nada que revisar (servicios que no existen, lista vacía): $null = "no aplica en esta PC", no "apagado".
+  if ($n) { $true }
 }
 
 # Planes de energía: lee el valor AC actual de un ajuste (independiente del idioma).
@@ -177,7 +178,7 @@ function TaskSet($pats, $on) {
     try { if ($on) { $t | Enable-ScheduledTask | Out-Null; Log "Tarea $($n): habilitada" } else { $t | Disable-ScheduledTask | Out-Null; Log "Tarea $($n): deshabilitada" } }
     catch { Log "Tarea $($n): protegida por Windows, se saltea" 'warn' } }
 }
-function TaskCheck($pats) { $f = @(FindTasks $pats); $f.Count -gt 0 -and @($f | Where-Object { $_.State -ne 'Disabled' }).Count -eq 0 }
+function TaskCheck($pats) { $f = @(FindTasks $pats); if ($f.Count) { @($f | Where-Object { $_.State -ne 'Disabled' }).Count -eq 0 } }
 function Apps { if ($null -eq $script:APPS) { $script:APPS = @(Get-AppxPackage) }; $script:APPS }
 function AppxFind($pats) { Apps | Where-Object { $n = $_.Name; @($pats | Where-Object { $n -like $_ }).Count -gt 0 } }
 function AppxRemove($pats) {
@@ -214,7 +215,15 @@ function NicApply($id, $kv) {
   NicRestart @($cur.a | Select-Object -Unique); WaitNics $n
 }
 function NicRevert($id, $kv) {
-  $b = Read-Bk "$id-nic"; if ($null -eq $b -or !@($b).Count) { Remove-Bk "$id-nic"; return }; $n = @(Nics).Count
+  $b = Read-Bk "$id-nic"; $n = @(Nics).Count
+  # Sin respaldo (aplicado con otra versión o a mano): lo que está como el tweak vuelve al valor por defecto del driver.
+  if ($null -eq $b -or !@($b).Count) {
+    Remove-Bk "$id-nic"; $cur = @(NicProps $kv | Where-Object { $_.v -eq [string]$kv[$_.k] }); if (!$cur.Count) { return }
+    Log 'No hay respaldo de la placa de red: se vuelve a los valores por defecto del driver' 'warn'
+    foreach ($c in $cur) { $d = [string](Get-NetAdapterAdvancedProperty -Name $c.a -RegistryKeyword $c.k).DefaultRegistryValue
+      if ($d) { Set-NetAdapterAdvancedProperty -Name $c.a -RegistryKeyword $c.k -RegistryValue $d -NoRestart; Log "Placa $($c.a) · $($c.k): $($c.v) → $d (por defecto)" } }
+    NicRestart @($cur.a | Select-Object -Unique); WaitNics $n; return
+  }
   $fail = 0
   foreach ($c in $b) { if (!$kv.ContainsKey($c.k)) { Log "El respaldo trae una propiedad de red ajena ($($c.k)): se saltea" 'warn'; continue }
     try { Set-NetAdapterAdvancedProperty -Name $c.a -RegistryKeyword $c.k -RegistryValue $c.v -NoRestart -ErrorAction Stop; Log "Placa $($c.a) · $($c.k): → $($c.v)" }
@@ -224,8 +233,8 @@ function NicRevert($id, $kv) {
   if ($fail) { throw "$fail propiedades de red no se pudieron restaurar; el respaldo se conserva para reintentar" }
   Remove-Bk "$id-nic"
 }
-# Cada driver expone distintas propiedades: solo se exige que las que existen tengan el valor buscado.
-function NicCheck($kv) { $p = @(NicProps $kv); $p.Count -gt 0 -and @($p | Where-Object { $_.v -ne [string]$kv[$_.k] }).Count -eq 0 }
+# Cada driver expone distintas propiedades: solo se exige que las que existen tengan el valor buscado. Sin ninguna, $null.
+function NicCheck($kv) { $p = @(NicProps $kv); if ($p.Count) { @($p | Where-Object { $_.v -ne [string]$kv[$_.k] }).Count -eq 0 } }
 `;
 
 const P_SUB = '54533251-82be-4824-96c1-47b60b740d00'; // procesador
@@ -271,7 +280,7 @@ const TWEAKS = [
     desc: 'SystemResponsiveness de 20% a 10%: el programador multimedia (MMCSS) deja más CPU para el juego.',
     reg: [R('HKLM:/SOFTWARE/Microsoft/Windows NT/CurrentVersion/Multimedia/SystemProfile', 'SystemResponsiveness', 10, 'DWord', 20)] },
   { id: 'mmcss', cat: 'fps', name: 'Prioridad MMCSS alta para juegos', rec: () => true,
-    desc: 'Sube la prioridad de CPU, GPU y E/S de la tarea "Games" del programador multimedia de Windows.',
+    desc: 'Pasa la tarea "Games" del programador multimedia (MMCSS) a categoría High y E/S alta. Solo afecta a los juegos que se registran en MMCSS como "Games".',
     reg: [R('HKLM:/SOFTWARE/Microsoft/Windows NT/CurrentVersion/Multimedia/SystemProfile/Tasks/Games', 'GPU Priority', 8, 'DWord', 8),
       R('HKLM:/SOFTWARE/Microsoft/Windows NT/CurrentVersion/Multimedia/SystemProfile/Tasks/Games', 'Priority', 6, 'DWord', 2),
       R('HKLM:/SOFTWARE/Microsoft/Windows NT/CurrentVersion/Multimedia/SystemProfile/Tasks/Games', 'Scheduling Category', 'High', 'String', 'Medium'),
@@ -384,7 +393,7 @@ const TWEAKS = [
     apply: String.raw`$b=@(foreach($a in Nics){ $g=(Get-NetAdapter -Name $a.Name).InterfaceGuid; [pscustomobject]@{ i=$a.ifIndex; ns=[string](Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$g").NameServer } }); Save-Bk 'dns' $b; foreach($a in Nics){ Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -ServerAddresses '1.1.1.1','1.0.0.1' }; Clear-DnsClientCache`,
     revert: String.raw`$b=Read-Bk 'dns'; if($null -eq $b){ foreach($a in Nics){ Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -ResetServerAddresses } } else { foreach($x in $b){ if($x.ns){ Set-DnsClientServerAddress -InterfaceIndex $x.i -ServerAddresses ($x.ns -split '[ ,]+') } else { Set-DnsClientServerAddress -InterfaceIndex $x.i -ResetServerAddresses } } }; Remove-Bk 'dns'; Clear-DnsClientCache`,
     // @() obligatorio: con un solo adaptador PowerShell devuelve un CimInstance y su .Count queda vacío.
-    pre: '$n=@(Nics)', check: String.raw`$n.Count -gt 0 -and @($n | Where-Object { (Get-DnsClientServerAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4).ServerAddresses[0] -ne '1.1.1.1' }).Count -eq 0` },
+    pre: '$n=@(Nics)', check: String.raw`$n.Count -gt 0 -and @($n | Where-Object { @((Get-DnsClientServerAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses)[0] -ne '1.1.1.1' }).Count -eq 0` },
 
   // ───────────── GPU ─────────────
   { id: 'gpumsi', cat: 'gpu', name: 'Modo MSI para la GPU', reboot: true, needs: s => !!s.gpuVendor, rec: s => !!s.gpuVendor,
@@ -554,11 +563,12 @@ const TWEAKS = [
     desc: 'Muestra .exe, .zip, etc. Ayuda a detectar archivos falsos.',
     reg: [R('HKCU:/Software/Microsoft/Windows/CurrentVersion/Explorer/Advanced', 'HideFileExt', 0, 'DWord', 1)] },
   { id: 'ads', cat: 'qol', name: 'Quitar anuncios y sugerencias de Windows', rec: () => true,
-    desc: 'Sin apps sugeridas en Inicio, sin tips en Configuración y sin instalaciones silenciosas de apps promocionadas.',
+    desc: 'Sin apps sugeridas ni recomendaciones en Inicio, sin tips en Configuración y sin instalaciones silenciosas de apps promocionadas.',
     reg: ['SubscribedContent-338393Enabled', 'SubscribedContent-353694Enabled', 'SubscribedContent-353696Enabled', 'SubscribedContent-338388Enabled',
       'SubscribedContent-310093Enabled', 'SystemPaneSuggestionsEnabled', 'SilentInstalledAppsEnabled', 'SoftLandingEnabled']
       .map(n => R('HKCU:/Software/Microsoft/Windows/CurrentVersion/ContentDeliveryManager', n, 0, 'DWord', 1))
-      .concat([R('HKCU:/Software/Microsoft/Windows/CurrentVersion/UserProfileEngagement', 'ScoobeSystemSettingEnabled', 0)]) },
+      .concat([R('HKCU:/Software/Microsoft/Windows/CurrentVersion/UserProfileEngagement', 'ScoobeSystemSettingEnabled', 0),
+        R('HKCU:/Software/Microsoft/Windows/CurrentVersion/Explorer/Advanced', 'Start_IrisRecommendations', 0)]) },
   { id: 'lockads', cat: 'qol', name: 'Quitar publicidad de la pantalla de bloqueo',
     desc: 'Sin "datos curiosos" ni anuncios sobre la imagen de bloqueo.',
     reg: [R('HKCU:/Software/Microsoft/Windows/CurrentVersion/ContentDeliveryManager', 'RotatingLockScreenOverlayEnabled', 0, 'DWord', 1),
@@ -646,8 +656,10 @@ function checkPS(t) {
   if (t.reg || t.L) c.push('(RegCheck $L)');
   if (t.pwr) c.push(`(PwrCheck ${pwrList(t)})`);
   if (t.nic) c.push(`(NicCheck ${nicHash(t)})`);
-  if (t.check) c.push(`(${t.check})`);
-  return `${t.pre || ''}\n$L=${lExpr(t)}\n[bool](${c.join(' -and ') || '$false'})`;
+  // RegCheck, NicCheck y TaskCheck dan $null si en esta PC no hay nada que revisar. Un chequeo propio se fuerza a bool.
+  if (t.check) c.push(/^TaskCheck /.test(t.check) ? `(${t.check})` : `[bool](${t.check})`);
+  // Si ninguna parte encontró qué revisar, 'na' (no aplica en esta PC); si no, activo = ninguna parte en falso.
+  return `${t.pre || ''}\n$L=${lExpr(t)}\n$c=@(${c.join(', ') || '$false'} | Where-Object { $null -ne $_ })\nif (!$c.Count) { 'na' } else { !@($c | Where-Object { !$_ }).Count }`;
 }
 function checkAllPS(list = TWEAKS) {
   return '$r=[ordered]@{}\n' + list.map(t =>
@@ -713,4 +725,108 @@ Log "DISM terminó (código $c)" $(if ($c) { 'warn' } else { 'ok' })
 'Liberados {0:N0} MB en {1}:' -f (((Get-PSDrive $sd).Free - $a) / 1MB), $sd` },
 ];
 
-module.exports = { TWEAKS, CATS, BOOSTS, PRELUDE, applyPS, revertPS, checkPS, checkAllPS };
+// Detalle de cada tweak (#9): qué hace por dentro y una fuente oficial. Cada `s` se abrió y se revisó que hable de
+// esa clave o ajuste; si no hay una fuente oficial, el tweak queda sin link. No poner foros ni links sin revisar.
+const L = 'https://learn.microsoft.com/es-es/';
+const SVCS = L + 'windows-server/security/windows-services/security-guidelines-for-disabling-system-services-in-windows-server';
+const MMCSS = L + 'windows/win32/procthread/multimedia-class-scheduler-service';
+const FSUTIL = L + 'windows-server/administration/windows-commands/fsutil-behavior';
+const SPI = L + 'windows/win32/api/winuser/nf-winuser-systemparametersinfoa';
+const USBSS = L + 'windows-hardware/drivers/usbcon/usb-selective-suspend';
+const PPM = L + 'windows-hardware/customize/power-settings/configure-processor-power-management-options';
+const DIAG = L + 'windows/privacy/configure-windows-diagnostic-data-in-your-organization';
+const CONN = L + 'windows/privacy/manage-connections-from-windows-operating-system-components-to-microsoft-services';
+const APPX = 'Corre Remove-AppxPackage para tu usuario. No borra la copia que Windows guarda para usuarios nuevos, así que Revertir la puede reinstalar.';
+const PRIO = 'Crea la clave Image File Execution Options\\<juego>.exe\\PerfOptions con CpuPriorityClass = 3 (alta) e IoPriority = 3 (alta). Windows la lee cada vez que se abre ese .exe; no hay un programa corriendo de fondo. Es una clave sin documentación oficial de Microsoft.';
+const INFO = {
+  ultimate: { d: 'Duplica el plan oculto "Máximo rendimiento" (e9a42b02-…) con el nombre "Botox Optimizer Ultimate" y lo activa. Revertir vuelve al plan Equilibrado y borra la copia.' },
+  gamemode: { d: 'Prende AutoGameModeEnabled y AllowAutoGameMode en HKCU\\Software\\Microsoft\\GameBar, lo mismo que el interruptor "Modo de juego" de Configuración > Juegos.', s: L + 'windows/apps/develop/settings/settings-windows-11' },
+  hags: { d: 'Pone HwSchMode = 2 en GraphicsDrivers. La GPU pasa a tener su propio procesador de programación en vez de depender de un hilo de alta prioridad del CPU. Solo funciona si el driver lo soporta; necesita reiniciar.', s: 'https://devblogs.microsoft.com/directx/hardware-accelerated-gpu-scheduling/' },
+  gamedvr: { d: 'Apaga GameDVR_Enabled y AppCaptureEnabled para tu usuario y pone la directiva AllowGameDVR = 0, que bloquea la grabación de Game Bar en toda la PC.', s: L + 'windows/client-management/mdm/policy-csp-applicationmanagement' },
+  fso: { d: 'Ajusta los valores GameDVR_FSEBehavior* en HKCU\\System\\GameConfigStore para que los juegos no usen las optimizaciones de pantalla completa. Microsoft muestra cómo apagarlas por juego si dan problemas de rendimiento o de input lag.', s: 'https://devblogs.microsoft.com/directx/demystifying-full-screen-optimizations/' },
+  windowedopt: { d: 'Agrega SwapEffectUpgradeEnable=1 a DirectXUserGlobalSettings, lo mismo que "Optimizaciones para juegos en ventana" en Configuración > Pantalla > Gráficos.', s: 'https://support.microsoft.com/es-es/windows/hardware/display-graphics/optimizations-for-windowed-games-in-windows-11' },
+  sysresp: { d: 'SystemResponsiveness es el porcentaje de CPU que el programador multimedia (MMCSS) garantiza a las tareas de baja prioridad. Windows usa 20; esto lo baja a 10, el mínimo que acepta.', s: MMCSS },
+  mmcss: { d: 'Cambia la tarea "Games" de MMCSS: Scheduling Category High (prioridad de hilo 23 a 26 en vez de 16 a 22), SFIO Priority High, Priority 6 y GPU Priority 8. Según Microsoft, GPU Priority todavía no se usa (8 ya es el valor de Windows) y, con categoría High, Priority se toma siempre como 2: lo que cambia de verdad es la categoría y la E/S. Solo lo notan los programas que avisan a MMCSS que son un juego.', s: MMCSS },
+  win32prio: { d: 'Win32PrioritySeparation define cuánto tiempo de CPU recibe cada hilo y cuánto más recibe la ventana activa. 0x26 = intervalos cortos y variables, con el máximo extra para el primer plano. Windows usa 2. La fuente es la referencia de TechNet de versiones viejas de Windows.', s: L + 'previous-versions/cc976120(v=technet.10)' },
+  powerthrottle: { d: 'PowerThrottlingOff = 1 apaga para toda la PC el "Power Throttling", que pone en modo de bajo consumo al CPU cuando corre trabajo que Windows considera de fondo.', s: 'https://blogs.windows.com/windows-insider/2017/04/18/introducing-power-throttling/' },
+  timerres: { d: 'Desde Windows 11, si un proceso queda minimizado u oculto, Windows deja de garantizarle la resolución de timer que pidió. GlobalTimerResolutionRequests = 1 vuelve al comportamiento de Windows 10. La clave en sí no está documentada por Microsoft; la fuente explica el cambio de Windows 11.', s: L + 'windows/win32/api/timeapi/nf-timeapi-timebeginperiod' },
+  dynamictick: { d: 'Corre bcdedit /set {current} disabledynamictick yes. Microsoft documenta esta opción como pensada solo para depurar: probala y revertila si no notás diferencia.', s: L + 'windows-hardware/drivers/devtest/bcdedit--set' },
+  vbs: { d: 'Pone en 0 EnableVirtualizationBasedSecurity, la Integridad de memoria (HypervisorEnforcedCodeIntegrity) y LsaCfgFlags (Credential Guard). Incluye apagar "Integridad de memoria" de Seguridad de Windows, pero también apaga VBS y Credential Guard.', s: L + 'windows/security/hardware-security/enable-virtualization-based-protection-of-code-integrity' },
+  mouseaccel: { d: 'MouseSpeed, MouseThreshold1 y MouseThreshold2 en 0 en HKCU\\Control Panel\\Mouse: son los tres valores que Windows usa para la aceleración (SPI_SETMOUSE).', s: SPI },
+  keyboard: { d: 'KeyboardDelay = 0 (la espera más corta antes de repetir) y KeyboardSpeed = 31 (la repetición más rápida), los mismos rangos que SPI_SETKEYBOARDDELAY y SPI_SETKEYBOARDSPEED.', s: SPI },
+  stickykeys: { d: 'Cambia los Flags de StickyKeys, ToggleKeys y Keyboard Response para que sus atajos (Shift 5 veces, Bloq Num 5 s, Shift derecho 8 s) no abran el aviso. Las funciones siguen disponibles desde Accesibilidad.', s: L + 'windows/win32/api/winuser/ns-winuser-stickykeys' },
+  bgapps: { d: 'GlobalUserDisabled = 1 y BackgroundAppGlobalToggle = 0 en tu usuario: las apps de la Tienda no corren de fondo. Las notificaciones de esas apps pueden llegar tarde.' },
+  usbpower: { d: 'Pone EnhancedPowerManagementEnabled = 0 y AllowIdleIrpInD3 = 0 en Device Parameters de cada dispositivo USB que Windows tiene registrado. Necesita reiniciar.' },
+  fth: { d: 'Fault Tolerant Heap aplica arreglos al montón de memoria de un programa que crasheó varias veces. FTH\\Enabled = 0 lo apaga para toda la PC.', s: L + 'previous-versions/windows/win32/win7appqual/fault-tolerant-heap' },
+  hibernate: { d: 'Corre powercfg /h off: borra hiberfil.sys y apaga la hibernación. También apaga el Inicio rápido, que depende de ella. Revertir corre powercfg /h on.', s: L + 'windows-hardware/design/device-experiences/powercfg-command-line-options' },
+  faststartup: { d: 'HiberbootEnabled = 0. Con el Inicio rápido, "apagar" cierra tu sesión pero hiberna el kernel; sin él, cada encendido carga el kernel y los drivers desde cero.', s: L + 'windows-hardware/drivers/kernel/distinguishing-fast-startup-from-wake-from-hibernation' },
+  usbsuspend: { d: 'En el plan de energía activo, "Configuración de suspensión selectiva de USB" pasa a Deshabilitado (enchufada y con batería).', s: USBSS },
+  aspm: { d: 'En el plan de energía activo, "PCI Express > Administración de energía del estado de vínculos" pasa a Desactivado.', s: L + 'windows-hardware/customize/power-settings/pci-express-settings-link-state-power-management' },
+  coreparking: { d: 'En el plan de energía activo, el mínimo de núcleos sin estacionar (CPMINCORES) pasa a 100%.', s: PPM },
+  cpuboost: { d: 'En el plan de energía activo, "Modo de aumento del rendimiento del procesador" (PERFBOOSTMODE) pasa a 2, Agresivo.', s: L + 'windows-hardware/customize/power-settings/options-for-perf-state-engine-perfboostmode' },
+  cpumin: { d: 'En el plan de energía activo, "Estado mínimo del procesador" pasa a 100%. Es el mismo valor que Microsoft usa de ejemplo en su perfil de energía para el Modo de juego.', s: PPM },
+  diskidle: { d: 'En el plan de energía activo, "Apagar el disco duro tras" pasa a Nunca (0). Windows usa 20 minutos.' },
+  netthrottle: { d: 'NetworkThrottlingIndex en SystemProfile de MMCSS: con 0xFFFFFFFF Windows no limita el procesamiento de paquetes de red mientras corren tareas multimedia. Windows usa 10.' },
+  nagle: { d: 'Pone TcpAckFrequency = 1, TCPNoDelay = 1 y TcpDelAckTicks = 0 en cada placa de red con IP. La fuente explica TCP_NODELAY, la opción con la que un programa apaga Nagle en su conexión. No cambia nada en juegos que usan UDP.', s: L + 'windows/win32/winsock/ipproto-tcp-socket-options' },
+  tcpparams: { d: 'En Tcpip\\Parameters: DefaultTTL 64, Tcp1323Opts 1 (escalado de ventana), MaxUserPort 65534 (más puertos de salida; Microsoft documenta este valor) y TcpTimedWaitDelay 30 s.', s: L + 'troubleshoot/windows-client/networking/connect-tcp-greater-than-5000-error-wsaenobufs-10055' },
+  qos: { d: 'Directiva NonBestEffortLimit = 0 en Psched: el Programador de paquetes QoS no reserva ancho de banda para tráfico prioritario. Si nada usa QoS, no cambia la velocidad.' },
+  deliveryopt: { d: 'Directiva DODownloadMode = 0: las actualizaciones se bajan solo por HTTP, sin compartir partes con otras PC.', s: L + 'windows/deployment/do/waas-delivery-optimization-reference' },
+  nicpower: { d: 'En cada placa de red física, apaga "Permitir que el equipo apague este dispositivo" y las opciones de ahorro del driver (EEE, Green Ethernet) si existen. Guarda lo que había para revertir.' },
+  niclatency: { d: 'En cada placa de red física, pone en 0 Interrupt Moderation, Flow Control y Large Send Offload si el driver los tiene. Sin respaldo, revertir vuelve a los valores por defecto del driver.' },
+  dns: { d: 'Configura 1.1.1.1 y 1.0.0.1 como DNS IPv4 en las placas de red activas. Guarda los que tenías y Revertir los devuelve.', s: 'https://developers.cloudflare.com/1.1.1.1/setup/windows/' },
+  gpumsi: { d: 'Pone MSISupported = 1 en Interrupt Management\\MessageSignaledInterruptProperties de la GPU. El driver tiene que soportarlo; necesita reiniciar.', s: L + 'windows-hardware/drivers/kernel/enabling-message-signaled-interrupts-in-the-registry' },
+  nvtelemetry: { d: 'Deshabilita las tareas programadas NvTm* y el servicio NvTelemetryContainer si existen. En drivers nuevos sin ellos, sale "no aplica".' },
+  nodriverwu: { d: 'Directiva ExcludeWUDriversInQualityUpdate = 1: Windows Update deja de ofrecer drivers. Los drivers los actualizás vos desde NVIDIA, AMD o el fabricante.', s: L + 'windows/client-management/mdm/policy-csp-update' },
+  mpo: { d: 'OverlayTestMode = 5 en HKLM\\SOFTWARE\\Microsoft\\Windows\\Dwm apaga Multi-Plane Overlay. NVIDIA publica un archivo .reg para apagar MPO si tenés parpadeos o pantallas negras. Necesita reiniciar.', s: 'https://nvidia.custhelp.com/app/answers/detail/a_id/5157' },
+  amdtelemetry: { d: 'Deshabilita los servicios AUEPLauncher y AMD Crash Defender y las tareas programadas de actualización de Adrenalin.' },
+  lastaccess: { d: 'NtfsDisableLastAccessUpdate = 0x80000001, lo mismo que fsutil behavior set disablelastaccess 1.', s: FSUTIL },
+  '8dot3': { d: 'NtfsDisable8dot3NameCreation = 1, lo mismo que fsutil behavior set disable8dot3 1. Los nombres cortos que ya existen no se borran.', s: FSUTIL },
+  ntfsmem: { d: 'NtfsMemoryUsage = 2, lo mismo que fsutil behavior set memoryusage 2: NTFS usa más memoria para su caché.', s: FSUTIL },
+  pagingexec: { d: 'DisablePagingExecutive = 1 en Memory Management: el código del kernel y de los drivers queda en RAM y no se pagina a disco.' },
+  memcompress: { d: 'Corre Disable-MMAgent -MemoryCompression. Revertir corre Enable-MMAgent -MemoryCompression.', s: L + 'powershell/module/mmagent/disable-mmagent' },
+  svchost: { d: 'Con más de 3,5 GB de RAM, Windows corre cada servicio en su propio svchost.exe. SvcHostSplitThresholdInKB = tu RAM total hace que los vuelva a agrupar.', s: L + 'windows/application-management/svchost-service-refactoring' },
+  sysmain: { d: 'Deshabilita el servicio SysMain (Superfetch), que precarga en RAM los programas que más usás.' },
+  wsearch: { d: 'Deshabilita el servicio WSearch, que mantiene el índice de archivos, mails y contenido para la búsqueda.' },
+  reserved: { d: 'Corre Set-WindowsReservedStorageState -State Disabled. Solo se puede si no hay una actualización en curso.', s: L + 'windows-hardware/manufacture/desktop/dism-storage-reserve' },
+  svcunneeded: { d: 'Deshabilita Fax, RetailDemo, MapsBroker, lfsvc, wisvc, WMPNetworkSvc y TrkWks si existen. La fuente es la guía de Microsoft para Windows Server, que describe cada servicio.', s: SVCS },
+  svcxbox: { d: 'Deshabilita XblAuthManager, XblGameSave y XboxNetApiSvc. La guía de Microsoft para Windows Server recomienda deshabilitarlos.', s: SVCS },
+  svcprint: { d: 'Deshabilita Spooler. Microsoft lo considera seguro de deshabilitar si la PC no es servidor de impresión; sin él no podés imprimir.', s: SVCS },
+  svcdiag: { d: 'Deshabilita PcaSvc (Asistente para la compatibilidad de programas). La guía de Microsoft lo marca como seguro de deshabilitar.', s: SVCS },
+  gvalorant: { d: PRIO },
+  gcs2: { d: PRIO },
+  gfortnite: { d: PRIO },
+  gaion2: { d: PRIO },
+  'lap-ac': { d: 'Cambia solo los valores "enchufado" del plan activo: boost agresivo, núcleos sin estacionar y sin ahorro de PCIe ni de USB. Los valores con batería no se tocan.' },
+  'lap-dgpu': { d: 'Busca los .exe de Valorant, CS2, Fortnite y AION 2 en las rutas habituales y les pone GpuPreference=2 (alto rendimiento) en UserGpuPreferences, lo mismo que Configuración > Pantalla > Gráficos.' },
+  diagtrack: { d: 'Deshabilita DiagTrack (Experiencias del usuario y telemetría asociadas) y dmwappushservice, los servicios que juntan y envían los datos de diagnóstico.', s: DIAG },
+  telemetrypol: { d: 'Directiva AllowTelemetry = 0. El nivel efectivo depende de tu edición de Windows; la fuente explica cada nivel.', s: DIAG },
+  telemetrytasks: { d: 'Deshabilita estas tareas programadas: Microsoft Compatibility Appraiser, ProgramDataUpdater, MareBackup, PcaPatchDbTask y StartupAppTask (Application Experience), todas las de Customer Experience Improvement Program, Autochk\\Proxy, DiskDiagnosticDataCollector y las de Feedback\\Siuf.' },
+  adid: { d: 'AdvertisingInfo\\Enabled = 0 en tu usuario (HKCU), lo mismo que el interruptor de Privacidad. La fuente documenta el mismo valor en HKLM, más una directiva, para apagarlo en toda la PC.', s: CONN },
+  activity: { d: 'Directivas EnableActivityFeed, PublishUserActivities y UploadUserActivities en 0: Windows no guarda ni sube tu historial de actividad.', s: L + 'windows/client-management/mdm/policy-csp-privacy' },
+  wer: { d: 'Windows Error Reporting\\Disabled = 1 y el servicio WerSvc deshabilitado.', s: L + 'windows/win32/wer/wer-settings' },
+  tailored: { d: 'NumberOfSIUFInPeriod = 0 (sin encuestas de Feedback) y TailoredExperiencesWithDiagnosticDataEnabled = 0 en tu usuario. La fuente documenta la misma función por directiva.', s: CONN },
+  copilot: { d: 'Directivas TurnOffWindowsCopilot = 1 y DisableAIDataAnalysis = 1 (no guarda capturas para Recall), y oculta el botón de Copilot de la barra de tareas.', s: L + 'windows/client-management/mdm/policy-csp-windowsai' },
+  bing: { d: 'Directiva DisableSearchBoxSuggestions = 1 y BingSearchEnabled = 0: el buscador del Inicio no consulta Bing.' },
+  cortana: { d: 'Directiva AllowCortana = 0.', s: L + 'windows/client-management/mdm/policy-csp-experience' },
+  firefox: { d: 'Directivas de empresa de Firefox DisableTelemetry y DisableDefaultBrowserAgent en HKLM\\SOFTWARE\\Policies\\Mozilla\\Firefox. Firefox muestra "Tu navegador está administrado por tu organización".', s: 'https://mozilla.github.io/policy-templates/' },
+  visualfx: { d: 'Efectos visuales en "Personalizado", con animaciones de ventanas, menús y barra de tareas apagadas (UserPreferencesMask, MinAnimate, TaskbarAnimations).' },
+  transparency: { d: 'EnableTransparency = 0, lo mismo que apagar "Efectos de transparencia" en Configuración > Personalización > Colores.' },
+  menudelay: { d: 'MenuShowDelay = 0 en HKCU\\Control Panel\\Desktop. Windows usa 400 ms.' },
+  startupdelay: { d: 'StartupDelayInMSec = 0 en Explorer\\Serialize: el Explorador lanza los programas de inicio sin esperar.' },
+  shutdown: { d: 'WaitToKillServiceTimeout = 2000 ms (cuánto espera Windows a que paren los servicios al reiniciar o apagar), y AutoEndTasks, HungAppTimeout y WaitToKillAppTimeout para las apps colgadas.', s: L + 'windows/win32/services/service-control-handler-function' },
+  endtask: { d: 'TaskbarEndTask = 1, lo mismo que "Finalizar tarea" en Configuración > Sistema > Avanzado.', s: L + 'windows/advanced-settings/' },
+  fileext: { d: 'HideFileExt = 0, lo mismo que "Mostrar extensiones de archivo" en el Explorador.' },
+  ads: { d: 'Apaga los SubscribedContent-*, SystemPaneSuggestions, SilentInstalledApps y SoftLanding de ContentDeliveryManager, ScoobeSystemSettingEnabled (la pantalla "Terminemos de configurar tu dispositivo" después de las actualizaciones) y Start_IrisRecommendations, el interruptor de recomendaciones del Inicio de Windows 11 que documenta la fuente.', s: L + 'windows/apps/develop/settings/settings-windows-11' },
+  lockads: { d: 'RotatingLockScreenOverlayEnabled y SubscribedContent-338387Enabled en 0: sin textos ni sugerencias sobre la imagen de la pantalla de bloqueo.' },
+  classicmenu: { d: 'Crea una clave vacía en HKCU\\Software\\Classes\\CLSID\\{86ca1aa0-…}\\InprocServer32, que hace que el Explorador use el menú clásico. Revertir borra esa clave.' },
+  widgets: { d: 'Desinstala MicrosoftWindows.Client.WebExperience (Windows Web Experience Pack). ' + APPX },
+  verboseboot: { d: 'VerboseStatus = 1 en Policies\\System, como documenta Microsoft. No se ven mensajes si DisableStatusMessages está en 1.', s: L + 'troubleshoot/windows-server/performance/enable-verbose-startup-shutdown-logon-logoff-status-messages' },
+  noautoreboot: { d: 'Directiva NoAutoRebootWithLoggedOnUsers = 1: con alguien con sesión abierta, Windows Update no reinicia solo.', s: L + 'windows/deployment/update/waas-restart' },
+  dbnews: { d: APPX }, dbgames: { d: APPX }, dbcopilot: { d: APPX }, dbclipchamp: { d: APPX }, dbteams: { d: APPX },
+  dboffice: { d: APPX }, dbhelp: { d: APPX }, dbmaps: { d: APPX }, dbdev: { d: APPX }, dbxbox: { d: APPX },
+  dbphone: { d: APPX + ' Además pone la directiva EnableMmx = 0.' },
+  onedrive: { d: 'Corre OneDriveSetup.exe /uninstall. La carpeta OneDrive y tus archivos quedan donde estaban. Revertir lo reinstala con winget.' },
+  edgebg: { d: 'Directivas de Edge StartupBoostEnabled = 0 y BackgroundModeEnabled = 0.', s: L + 'deployedge/microsoft-edge-policies/StartupBoostEnabled' },
+};
+
+module.exports = { TWEAKS, INFO, CATS, BOOSTS, PRELUDE, applyPS, revertPS, checkPS, checkAllPS };

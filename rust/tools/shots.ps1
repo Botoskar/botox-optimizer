@@ -4,7 +4,7 @@ if ($Profile -ne 'debug') { throw 'Las capturas usan BX_SHOT/BX_PAGE, que el .ex
 $exe = "M:\Github Things\botox-optimizer-rust\target\$Profile\botox-optimizer.exe"
 New-Item -ItemType Directory $Out -Force | Out-Null
 $shots = @(
-  @{ n = 'home'; page = 'home' }, @{ n = 'scan'; page = 'scan' }, @{ n = 'tweaks'; page = 'tweaks' },
+  @{ n = 'home'; page = 'home' }, @{ n = 'scan'; page = 'scan' }, @{ n = 'tweaks'; page = 'tweaks' }, @{ n = 'fix'; page = 'fix' },
   @{ n = 'debloat'; page = 'debloat' }, @{ n = 'boost'; page = 'boost'; demo = '1' }, @{ n = 'backup'; page = 'backup' },
   @{ n = 'notebook'; page = 'tweaks'; tab = 'laptop'; laptop = '1' }
 )

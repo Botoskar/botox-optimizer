@@ -1,8 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod catalog;
+mod diag;
 mod engine;
 mod hwscan;
 mod pages;
+mod profile;
 mod reg;
 mod sha256;
 mod startup;
@@ -23,12 +25,13 @@ use std::time::{Duration, Instant};
 use theme::*;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Page { Home, Scan, Tweaks, Debloat, Boost, Startup, Backup }
+pub enum Page { Home, Scan, Tweaks, Fix, Debloat, Boost, Startup, Backup }
 
-const NAV: [(Page, &str, &str); 7] = [
+const NAV: [(Page, &str, &str); 8] = [
     (Page::Home, ic::HOUSE, "Inicio"),
     (Page::Scan, ic::CPU, "Escáner"),
     (Page::Tweaks, ic::ROCKET_LAUNCH, "Optimizaciones"),
+    (Page::Fix, ic::WRENCH, "Solucionar"),
     (Page::Debloat, ic::TRASH, "Debloat"),
     (Page::Boost, ic::GAUGE, "Boost-Up"),
     (Page::Startup, ic::POWER, "Arranque"),
@@ -39,8 +42,11 @@ const NAV: [(Page, &str, &str); 7] = [
 pub enum Msg {
     Scan(Result<Value, String>),
     /// Estados de tweaks. `ps` = es la tanda de PowerShell (la lenta).
-    States { map: HashMap<String, bool>, ps: bool },
+    /// `na`: los de esta tanda que no aplican en esta PC.
+    States { map: HashMap<String, bool>, ps: bool, na: HashSet<String> },
     Toggled { id: String, on: bool, done: engine::Done, quiet: bool },
+    /// Re-chequeo de un solo tweak al pasar el mouse por su interruptor. `None` = no aplica en esta PC.
+    Rechecked(String, Option<bool>),
     Boosted { id: String, ok: bool, out: String, err: String },
     Restore(Result<Vec<(String, String)>, String>),
     RestoreCreated(Result<(), String>),
@@ -72,12 +78,22 @@ pub enum Action {
     /// Enciende o apaga el programa de arranque que está en esa posición de la lista.
     Startup(usize),
     RescanStartup,
+    /// Vuelve a leer el estado de los tweaks sin borrar el que se muestra (no reescanea el hardware).
+    Verify,
+    /// Elige un perfil .botox y muestra la confirmación de lote con lo que aplica a esta PC.
+    ImportProfile,
     /// Pide confirmación para instalar la versión nueva; UpdateNow la instala.
     Update,
     UpdateNow,
 }
 
 pub struct Confirm { pub text: String, pub action: Action }
+
+/// Aviso de las confirmaciones de lote: el botón "Crear punto y continuar" hace las dos cosas en orden.
+const RP_HINT: &str = "Si algo sale mal, un punto de restauración te deja volver la PC a como está ahora.";
+
+/// Aviso abajo a la derecha. `undo`: botón "Deshacer" que vuelve atrás el cambio recién hecho.
+struct Toast { msg: String, color: Color32, at: Instant, secs: f32, undo: Option<Action> }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 #[serde(default)]
@@ -93,7 +109,14 @@ struct Saved {
     /// Posición y tamaño de la ventana [x, y, ancho, alto] para abrirla donde quedó.
     win: Option<[f32; 4]>,
     maximized: bool,
+    /// Tamaño de letra (#6): zoom de toda la interfaz, 1.0 a ZOOM_MAX. 0 (preferencias viejas) cuenta como 1.0.
+    zoom: f32,
 }
+
+const ZOOM_MAX: f32 = 1.3;
+/// Tamaño mínimo de la ventana en puntos de egui (a 100 %).
+const MIN_W: f32 = 1180.0;
+const MIN_H: f32 = 720.0;
 
 const SIDE_W: f32 = 196.0;
 
@@ -116,8 +139,10 @@ pub struct App {
     pub confirm: Option<Confirm>,
     /// Tweaks que el usuario destildó en la confirmación de un lote.
     confirm_skip: HashSet<String>,
+    /// Lote que espera a que Windows termine de crear el punto de restauración ("Crear punto y continuar").
+    after_restore: Option<Vec<String>>,
     queue: VecDeque<String>,
-    bulk: Option<(usize, usize, bool)>, // (total, ok, alguno pide reinicio)
+    bulk: Option<(usize, usize, bool, Vec<String>)>, // (total, ok, alguno pide reinicio, los que quedaron como se pidió)
     pub boost_sel: usize,
     pub boost_out: HashMap<String, String>,
     pub restore: Option<Result<Vec<(String, String)>, String>>,
@@ -130,7 +155,7 @@ pub struct App {
     lines: Vec<Line>,
     running: u32,
     run_start: Instant,
-    toasts: Vec<(String, Color32, Instant, f32)>,
+    toasts: Vec<Toast>,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
     log_tx: Sender<Line>,
@@ -150,6 +175,27 @@ pub struct App {
     page_at: Instant,
     /// Ctrl+F: enfocar el buscador cuando se dibuje.
     pub focus_search: bool,
+    /// "Optimizar para juegos" incluye también las de riesgo medio (casilla en Inicio).
+    pub one_click_medium: bool,
+    /// Cuándo terminó la última lectura completa del estado de los tweaks, y si hay una en curso.
+    pub states_at: Option<Instant>,
+    pub verifying: bool,
+    /// La ventana tenía el foco en el cuadro anterior (para re-verificar al volver a ella).
+    had_focus: bool,
+    /// `--safe`: modo de recuperación, solo se puede revertir.
+    pub safe: bool,
+    /// Tweak cuyo detalle ("Qué cambia") se muestra en un panel.
+    pub detail: Option<String>,
+    /// Re-chequeo por hover: si hay uno en curso y cuándo se re-chequeó cada tweak.
+    pub rechecking: bool,
+    pub rechecked: HashMap<String, Instant>,
+}
+
+/// Re-chequear un tweak al pasar el mouse: solo si el estado tiene más de 5 min, no se re-chequeó ese mismo en los
+/// últimos 5 min y no hay otro en curso (pasar el mouse por toda la lista no abre un PowerShell por interruptor).
+fn should_recheck(states_age: Option<Duration>, last: Option<Duration>, in_flight: bool) -> bool {
+    let old = |d: Option<Duration>| d.map_or(true, |d| d > Duration::from_secs(300));
+    !in_flight && states_age.is_some() && old(states_age) && old(last)
 }
 
 fn main() -> eframe::Result {
@@ -163,9 +209,9 @@ fn main() -> eframe::Result {
     if std::env::args().any(|a| a == "--check") {
         let cat = Catalog::load();
         let t0 = Instant::now();
-        let mut all = engine::check_all_native(&cat);
+        let mut all = engine::check_all_native(&cat).0;
         let native_ms = t0.elapsed().as_millis();
-        all.extend(engine::check_all_ps(&cat));
+        all.extend(engine::check_all_ps(&cat).0);
         eprintln!("nativos: {native_ms} ms · total: {} ms · admin: {}", t0.elapsed().as_millis(), engine::is_admin());
         let sorted: std::collections::BTreeMap<_, _> = all.into_iter().collect();
         println!("{}", serde_json::to_string(&sorted).unwrap());
@@ -180,6 +226,21 @@ fn main() -> eframe::Result {
         println!("{}", spec.map_or_else(|e| format!("{{\"error\":{}}}", Value::String(e)), |v| v.to_string()));
         return Ok(());
     }
+    // Emergencia sin interfaz: revierte todo lo que hizo la app (por si la ventana no abre). Va antes de on_start: una
+    // corrida sin ventana justo después de actualizar dejaría el marcador en "1" y el próximo arranque volvería atrás.
+    if args.iter().any(|a| a == "--revert-all") {
+        if sys::fake_kind().is_some() {
+            win::message("En modo prueba (BX_FAKE) no se revierte nada.", true);
+        } else if !win::single_instance() {
+            win::message("Botox Optimizer está abierto: cerralo y repetí, o usá \"Revertir todo\" en Backups.", true);
+        } else {
+            // Si falla, cada respaldo ilegible lo dice en el resumen.
+            let _ = reg::repair_backups();
+            let (ok, msg) = revert_all_cli(args.iter().any(|a| a == "--yes"));
+            win::message(&msg, !ok);
+        }
+        return Ok(());
+    }
     // Las copias de prueba (BX_FAKE, capturas) no cambian nada en la PC: pueden abrirse junto a la app real y no tocan
     // la actualización. La real primero toma el mutex: así otra instancia (o la vieja que todavía cierra) no la hace
     // salir con el marcador ya en "1", ni dos arranques juntos deciden volver atrás.
@@ -192,10 +253,11 @@ fn main() -> eframe::Result {
     }
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).expect("icono");
     let saved = load_saved();
+    let z = saved.zoom.clamp(1.0, ZOOM_MAX);
     let mut vp = egui::ViewportBuilder::default()
         .with_title(match sys::fake_kind().as_deref() { Some("amd") => "Botox Optimizer · PRUEBA: Radeon + Ryzen simulados", Some(_) => "Botox Optimizer · PRUEBA: Ryzen X3D simulado", None => "Botox Optimizer" })
         .with_inner_size([1340.0, 860.0])
-        .with_min_inner_size([1180.0, 720.0])
+        .with_min_inner_size([MIN_W * z, MIN_H * z])
         .with_icon(icon)
         .with_maximized(saved.maximized);
     // Abre donde quedó la última vez (si no estaba minimizada fuera de pantalla).
@@ -226,6 +288,71 @@ fn install_panic_log() {
         let _ = file.and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()));
         prev(info);
     }));
+}
+
+/// Tweaks activos que la app puede revertir: tienen respaldo o se activaron desde acá. Lo usan "Revertir todo" y
+/// `--revert-all`.
+fn reversible_ids(cat: &Catalog, is_on: &dyn Fn(&str) -> bool, backups: &[(String, std::time::SystemTime)], applied: &HashSet<String>) -> Vec<String> {
+    let mut ids: Vec<String> = backups.iter().map(|b| b.0.trim_end_matches("-nic").to_string()).chain(applied.iter().cloned()).filter(|id| is_on(id) && cat.tweak(id).is_some()).collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// Modo seguro (`--safe`): solo revertir, crear o abrir puntos de restauración, mirar y reiniciar. Un interruptor solo
+/// se puede tocar si está encendido (o sea, para revertirlo).
+fn safe_allows(a: &Action, is_on: &dyn Fn(&str) -> bool) -> bool {
+    match a {
+        Action::Go(p, _) => *p == Page::Backup,
+        Action::Toggle(id) | Action::ToggleNow(id) => is_on(id),
+        Action::RevertAll | Action::ManyNow(_) | Action::CreateRestore | Action::OpenRestore | Action::Cancel | Action::Reboot | Action::RebootNow | Action::Rescan | Action::Verify => true,
+        _ => false,
+    }
+}
+
+/// `--revert-all`: lee el estado real, revierte todo lo reversible y deja un resumen. Sin `--yes` solo dice qué haría.
+fn revert_all_cli(yes: bool) -> (bool, String) {
+    if !engine::is_admin() {
+        return (false, "Para revertir hay que abrirlo como administrador.".into());
+    }
+    let cat = Catalog::load();
+    let mut state = engine::check_all_native(&cat).0;
+    state.extend(engine::check_all_ps(&cat).0);
+    let mut saved = load_saved();
+    let ids = reversible_ids(&cat, &|id| state.get(id) == Some(&true), &engine::backups(), &saved.applied);
+    if ids.is_empty() {
+        return (true, "No hay cambios de Botox Optimizer para revertir.".into());
+    }
+    let names: Vec<String> = ids.iter().filter_map(|id| cat.tweak(id)).map(|t| format!("• {}", t.name)).collect();
+    if !yes {
+        return (true, format!("Se revertirían {} cambios:\n{}\n\nPara hacerlo, repetí el comando con --revert-all --yes", ids.len(), names.join("\n")));
+    }
+    let mut fails = vec![];
+    for id in &ids {
+        let t = cat.tweak(id).unwrap();
+        let d = engine::toggle(&cat, t, false, &Log(None));
+        saved.state.insert(id.clone(), d.state);
+        if d.ok && !d.state {
+            saved.applied.remove(id);
+        } else {
+            fails.push(format!("• {}: {}", t.name, if d.ok { "Windows todavía no refleja el cambio (puede requerir reinicio)" } else { &d.err }));
+        }
+    }
+    let _ = write_atomic(&saved_path(), serde_json::to_string(&saved).unwrap().as_bytes());
+    let ok = ids.len() - fails.len();
+    if fails.is_empty() {
+        (true, format!("Listo: se revirtieron {ok} cambios. Reiniciá la PC para terminar."))
+    } else {
+        (false, format!("Se revirtieron {ok} de {}. Fallaron:\n{}", ids.len(), fails.join("\n")))
+    }
+}
+
+/// Ícono y texto de un aviso en un solo bloque: un layout horizontal acá se estira a toda la altura.
+fn toast_text(ui: &mut egui::Ui, icon: &str, t: &Toast) {
+    let mut job = egui::text::LayoutJob::default();
+    job.append(icon, 0.0, egui::TextFormat { font_id: regular(15.0), color: t.color, ..Default::default() });
+    job.append(&t.msg, 9.0, egui::TextFormat { font_id: regular(13.5), color: TEXT, ..Default::default() });
+    ui.add(egui::Label::new(job).wrap());
 }
 
 fn saved_path() -> std::path::PathBuf {
@@ -288,7 +415,14 @@ fn write_atomic(p: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&tmp, p)
 }
 
-fn load_saved() -> Saved { std::fs::read_to_string(saved_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default() }
+fn load_saved() -> Saved {
+    let mut s: Saved = std::fs::read_to_string(saved_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    // BX_ZOOM=1.3: capturas con la letra grande, sin tocar las preferencias.
+    if let Some(z) = win::test_env("BX_ZOOM").and_then(|z| z.parse().ok()) {
+        s.zoom = z;
+    }
+    s
+}
 
 pub fn unix_now() -> u64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) }
 
@@ -302,9 +436,10 @@ impl App {
         let (tx, rx) = channel();
         let (log_tx, log_rx) = channel();
         let saved = load_saved();
+        cc.egui_ctx.set_zoom_factor(saved.zoom.clamp(1.0, ZOOM_MAX));
         let mut app = Self {
             cat: Arc::new(Catalog::load()),
-            page: match win::test_env("BX_PAGE").as_deref() { Some("scan") => Page::Scan, Some("tweaks") => Page::Tweaks, Some("debloat") => Page::Debloat, Some("boost") => Page::Boost, Some("backup") => Page::Backup, Some("startup") => Page::Startup, _ => Page::Home },
+            page: match win::test_env("BX_PAGE").as_deref() { Some("scan") => Page::Scan, Some("tweaks") => Page::Tweaks, Some("fix") => Page::Fix,Some("debloat") => Page::Debloat, Some("boost") => Page::Boost, Some("backup") => Page::Backup, Some("startup") => Page::Startup, _ => Page::Home },
             startup: Vec::new(),
             update: None,
             fake: sys::fake_kind(),
@@ -322,6 +457,7 @@ impl App {
             actions: vec![],
             confirm: None,
             confirm_skip: HashSet::new(),
+            after_restore: None,
             queue: VecDeque::new(),
             bulk: None,
             boost_sel: 0,
@@ -346,7 +482,26 @@ impl App {
             frames: 0,
             page_at: Instant::now(),
             focus_search: false,
+            one_click_medium: false,
+            states_at: None,
+            verifying: false,
+            detail: None,
+            rechecking: false,
+            rechecked: HashMap::new(),
+            had_focus: true,
+            safe: std::env::args().any(|a| a == "--safe"),
         };
+        if app.safe {
+            app.page = Page::Backup;
+        }
+        // Repara los permisos de los respaldos que dejaron versiones anteriores, y lo dice en la consola.
+        if !is_test_copy() && app.admin && reg::backup_dir().exists() {
+            let log = Log(Some(app.log_tx.clone()));
+            match reg::repair_backups() {
+                Ok(()) => log.put("info", "Permisos de la carpeta de respaldos verificados"),
+                Err(e) => log.put("err", format!("No se pudieron reparar los permisos de los respaldos: {e}")),
+            }
+        }
         app.load_all();
         // Arranque instantáneo: muestra lo último que se supo de la PC; los datos frescos llegan en segundos.
         if let Some(spec) = app.saved.spec.clone() {
@@ -377,8 +532,8 @@ impl App {
         self.scan_err = None;
         self.ps_ready = false;
         self.spawn(|tx, _, cat| { let _ = tx.send(Msg::Scan(sys::scan(&cat))); });
-        self.spawn(|tx, _, cat| { let _ = tx.send(Msg::States { map: engine::check_all_native(&cat), ps: false }); });
-        self.spawn(|tx, _, cat| { let _ = tx.send(Msg::States { map: engine::check_all_ps(&cat), ps: true }); });
+        self.spawn(|tx, _, cat| { let _ = tx.send({ let (map, na) = engine::check_all_native(&cat); Msg::States { map, ps: false, na } }); });
+        self.spawn(|tx, _, cat| { let _ = tx.send({ let (map, na) = engine::check_all_ps(&cat); Msg::States { map, ps: true, na } }); });
     }
 
     fn save(&self) {
@@ -390,7 +545,7 @@ impl App {
         }
     }
 
-    pub fn toast(&mut self, msg: impl Into<String>, color: Color32, secs: f32) { self.toasts.push((msg.into(), color, Instant::now(), secs)); }
+    pub fn toast(&mut self, msg: impl Into<String>, color: Color32, secs: f32) { self.toasts.push(Toast { msg: msg.into(), color, at: Instant::now(), secs, undo: None }); }
     pub fn on(&self, id: &str) -> bool { self.state.get(id).copied().unwrap_or(false) }
     pub fn boost_last(&self, id: &str) -> Option<u64> { self.saved.boost_last.get(id).copied() }
     pub fn applied(&self) -> &HashSet<String> { &self.saved.applied }
@@ -417,10 +572,21 @@ impl App {
         });
     }
 
-    fn act(&mut self, a: Action) {
+    fn act(&mut self, mut a: Action) {
+        if self.safe {
+            if !safe_allows(&a, &|id| self.on(id)) {
+                self.toast("Modo seguro: solo se pueden revertir los cambios de Botox Optimizer.", ACCENT, 4.0);
+                return;
+            }
+            // Un lote en modo seguro solo revierte: lo que ya está apagado no se vuelve a aplicar.
+            if let Action::ManyNow(ids) = &mut a {
+                ids.retain(|id| self.state.get(id) == Some(&true));
+            }
+        }
         // En modo de prueba solo se puede mirar: ni tweaks, ni limpiezas, ni reinicios, ni actualizaciones, aunque la app tenga permisos de administrador.
-        if self.fake.is_some() && !matches!(a, Action::Go(..) | Action::Rescan | Action::RescanStartup) {
+        if self.fake.is_some() && !matches!(a, Action::Go(..) | Action::Rescan | Action::RescanStartup | Action::Verify) {
             self.toast("Modo prueba: con hardware simulado no se aplica nada en la PC.", ACCENT, 3.5);
+            self.after_restore = None; // "Crear punto y continuar" no llega a correr: el lote no queda esperando
             return;
         }
         match a {
@@ -474,11 +640,14 @@ impl App {
                 if ids.is_empty() || self.need_admin() {
                     return;
                 }
-                let text = format!("Se van a {verb} {} optimizaciones.\n\nConviene crear antes un punto de restauración (sección Backups).\n\n¿Continuar?", ids.len());
+                if self.after_restore.is_some() {
+                    return self.toast("Esperá a que termine de crearse el punto de restauración.", ACCENT, 4.0);
+                }
+                let text = format!("Se van a {verb} {} optimizaciones.\n\n{RP_HINT}\n\n¿Continuar?", ids.len());
                 self.confirm = Some(Confirm { text, action: Action::ManyNow(ids) });
             }
             Action::ManyNow(ids) => {
-                self.bulk = Some((ids.len(), 0, false));
+                self.bulk = Some((ids.len(), 0, false, Vec::new()));
                 self.queue = ids.into();
             }
             // Limpiar shaders hace tironear las primeras partidas: se avisa antes.
@@ -530,6 +699,13 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
             // Mientras hay uno en curso no se lanza otro (Cancelar lo corta y libera).
             Action::Rescan if !self.ps_ready || (self.spec.is_none() && self.scan_err.is_none()) => self.toast("Ya hay un escaneo en curso", ACCENT, 2.5),
             Action::Rescan => self.load_all(),
+            // Con una lectura en curso (o el primer escaneo sin terminar) no se lanza otra.
+            Action::Verify if self.verifying || !self.ps_ready => {}
+            Action::Verify => {
+                self.verifying = true;
+                self.spawn(|tx, _, cat| { let _ = tx.send({ let (map, na) = engine::check_all_native(&cat); Msg::States { map, ps: false, na } }); });
+                self.spawn(|tx, _, cat| { let _ = tx.send({ let (map, na) = engine::check_all_ps(&cat); Msg::States { map, ps: true, na } }); });
+            }
             Action::Cancel => {
                 engine::cancel_all();
                 self.toast("Cancelando lo que está en curso…", ACCENT, 4.0);
@@ -543,6 +719,32 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
                 self.spawn(|tx, log, cat| { let _ = tx.send(Msg::RestoreCreated(engine::create_restore_point(&cat, &log))); });
             }
             Action::OpenRestore => engine::open_system_restore(),
+            Action::ImportProfile => {
+                if self.need_admin() {
+                    return;
+                }
+                if !self.ps_ready {
+                    self.toast("Esperá a que termine de leer el estado de tu PC.", ACCENT, 4.0);
+                    return;
+                }
+                let Some(path) = rfd::FileDialog::new().set_title("Elegí un perfil").add_filter("Perfil de Botox Optimizer", &["botox"]).pick_file() else { return };
+                let (p, dropped) = match profile::import(&path, &self.cat) {
+                    Ok(x) => x,
+                    Err(e) => return self.toast(format!("No se pudo importar: {e}"), RED, 7.0),
+                };
+                // Solo lo que corresponde a esta PC y se sabe que está apagado; las de riesgo medio, destildadas.
+                let f = &self.facts;
+                let ids: Vec<String> = p.applied.iter().filter(|id| self.cat.tweak(id).is_some_and(|t| (t.cat != "laptop" || f.laptop) && t.applies(f)) && self.state.get(*id) == Some(&false)).cloned().collect();
+                let left = p.applied.len() - ids.len() + dropped;
+                if ids.is_empty() {
+                    return self.toast("Nada para aplicar: lo del perfil ya está activo o no corresponde a esta PC.", ACCENT, 6.0);
+                }
+                self.confirm_skip = ids.iter().filter(|id| self.cat.tweak(id).is_some_and(|t| t.risk != "low")).cloned().collect();
+                let from = if p.pc_summary.is_empty() { String::new() } else { format!("Perfil de: {}. ", p.pc_summary) };
+                let note = if left > 0 { format!("{left} quedan afuera (ya activas, no aplican a esta PC o son de otra versión). ") } else { String::new() };
+                let text = format!("Se van a aplicar {} optimizaciones del perfil.\n\n{from}{note}Las de riesgo medio quedan destildadas: tildalas si las querés.\n\n¿Continuar?", ids.len());
+                self.confirm = Some(Confirm { text, action: Action::ManyNow(ids) });
+            }
             Action::RevertAll => {
                 let ids = self.reversible();
                 if ids.is_empty() {
@@ -556,12 +758,7 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
     }
 
     /// Tweaks activos que la app puede revertir: tienen respaldo o se activaron desde acá.
-    pub fn reversible(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self.backups.iter().map(|b| b.0.trim_end_matches("-nic").to_string()).chain(self.saved.applied.iter().cloned()).filter(|id| self.on(id) && self.cat.tweak(id).is_some()).collect();
-        ids.sort();
-        ids.dedup();
-        ids
-    }
+    pub fn reversible(&self) -> Vec<String> { reversible_ids(&self.cat, &|id| self.on(id), &self.backups, &self.saved.applied) }
 
     pub fn refresh_backups(&mut self) {
         self.backups = engine::backups();
@@ -572,19 +769,28 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
     fn handle(&mut self, m: Msg) {
         match m {
             Msg::Scan(Ok(spec)) => {
+                let na = std::mem::take(&mut self.facts.na);
                 self.facts = sys::facts(&spec);
+                self.facts.na = na;
                 self.saved.spec = Some(spec.clone());
                 self.spec = Some(spec);
                 self.save();
             }
             Msg::Scan(Err(e)) => self.scan_err = Some(e),
-            Msg::States { map, ps } => {
+            Msg::States { map, ps, na } => {
+                // Cada tanda (nativa o PowerShell) renueva los "no aplica" de sus propios tweaks.
+                self.facts.na.retain(|id| !map.contains_key(id));
+                self.facts.na.extend(na);
                 self.state.extend(map);
                 self.ps_ready |= ps;
                 if ps {
-                    self.saved.state = self.state.clone();
-                    self.save();
+                    self.states_at = Some(Instant::now());
+                    self.verifying = false;
                 }
+                // También la tanda rápida: si se cierra antes de que llegue la de PowerShell, el próximo arranque
+                // muestra igual los estados nativos frescos.
+                self.saved.state = self.state.clone();
+                self.save();
             }
             Msg::Toggled { id, on, done, quiet } => {
                 self.busy.remove(&id);
@@ -599,17 +805,37 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
                 if let Some(b) = &mut self.bulk {
                     b.1 += done.ok as usize;
                     b.2 |= t.reboot;
+                    if done.ok && done.state == on && !done.na {
+                        b.3.push(id.clone());
+                    }
+                }
+                if done.na {
+                    self.facts.na.insert(id.clone());
                 }
                 if !done.ok {
                     self.toast(format!("{}: {}", t.name, done.err), RED, 8.0);
+                } else if done.na {
+                    self.toast(format!("{}: en esta PC no hay nada que cambiar, así que no aplica.", t.name), ACCENT, 6.0);
                 } else if done.state != on {
                     self.toast(format!("{}: se ejecutó pero Windows no refleja el cambio todavía (puede requerir reinicio).", t.name), ACCENT, 7.0);
                 } else if !quiet {
                     let reboot = if t.reboot && on { " · requiere reiniciar" } else { "" };
-                    self.toast(format!("{}: {}{reboot}", if on { "Activado" } else { "Revertido" }, t.name), if on { GREEN } else { ACCENT }, 4.5);
+                    // Deshacer = el mismo interruptor otra vez (Toggle, no ToggleNow: volver a aplicar uno de riesgo
+                    // medio sigue pidiendo confirmación). Solo si quedó como se pidió; si no, iría para el lado equivocado.
+                    let msg = format!("{}: {}{reboot}", if on { "Activado" } else { "Revertido" }, t.name);
+                    let secs = if t.risk == "low" { 8.0 } else { 12.0 };
+                    self.toasts.push(Toast { msg, color: if on { GREEN } else { ACCENT }, at: Instant::now(), secs, undo: Some(Action::Toggle(id.clone())) });
                 }
                 if self.page == Page::Backup {
                     self.backups = engine::backups();
+                }
+            }
+            Msg::Rechecked(id, st) => {
+                self.rechecking = false;
+                // Si mientras tanto se aplicó o revirtió, manda el resultado de ese cambio.
+                if !self.busy.contains(&id) {
+                    self.state.insert(id.clone(), st == Some(true));
+                    if st.is_none() { self.facts.na.insert(id); } else { self.facts.na.remove(&id); }
                 }
             }
             Msg::Boosted { id, ok, out, err } => {
@@ -652,9 +878,21 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
             Msg::Restore(r) => self.restore = Some(r),
             Msg::RestoreCreated(r) => {
                 self.busy.remove("rp");
-                match r {
-                    Ok(()) => self.toast("Punto de restauración creado.", GREEN, 5.0),
-                    Err(e) => self.toast(format!("No se pudo crear: {e} (Windows permite uno cada 24 h y requiere la protección del sistema activa)."), RED, 9.0),
+                let why = "Windows permite uno cada 24 h y requiere la protección del sistema activa";
+                // "Crear punto y continuar": el lote corre recién ahora. Si el punto falló, se pregunta antes de seguir.
+                match (r, self.after_restore.take()) {
+                    (Ok(()), Some(ids)) => {
+                        self.toast("Punto de restauración creado. Aplicando…", GREEN, 5.0);
+                        self.actions.push(Action::ManyNow(ids));
+                    }
+                    (Err(e), Some(ids)) if self.confirm.is_none() => {
+                        let text = format!("No se pudo crear el punto de restauración\n\n{e} ({why}). Las optimizaciones de abajo todavía no se aplicaron.\n\n¿Continuar?");
+                        self.confirm = Some(Confirm { text, action: Action::ManyNow(ids) });
+                    }
+                    // Había otra confirmación abierta: no se pisa; el lote se descarta con aviso.
+                    (Err(e), Some(_)) => self.toast(format!("No se pudo crear el punto ({e}): no se aplicó nada."), RED, 9.0),
+                    (Ok(()), None) => self.toast("Punto de restauración creado.", GREEN, 5.0),
+                    (Err(e), None) => self.toast(format!("No se pudo crear: {e} ({why})."), RED, 9.0),
                 }
                 self.refresh_backups();
             }
@@ -696,9 +934,11 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
         if !toggling {
             if let Some(id) = self.queue.pop_front() {
                 self.start_toggle(id, true);
-            } else if let Some((total, ok, reboot)) = self.bulk.take() {
+            } else if let Some((total, ok, reboot, changed)) = self.bulk.take() {
                 let tail = if reboot { " Reiniciá la PC para terminar de aplicar." } else { "" };
-                self.toast(format!("{ok}/{total} listas.{tail}"), if ok == total { GREEN } else { ACCENT }, 8.0);
+                // Un solo "Deshacer" para todo el lote: vuelve atrás, en la misma cola, solo lo que quedó como se pidió.
+                let undo = (!changed.is_empty()).then(|| Action::ManyNow(changed));
+                self.toasts.push(Toast { msg: format!("{ok}/{total} listas.{tail}"), color: if ok == total { GREEN } else { ACCENT }, at: Instant::now(), secs: 12.0, undo });
             }
         }
         // Uso en vivo: solo en Inicio y con el mouse sobre la ventana, para no gastar nada de fondo.
@@ -710,7 +950,7 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
             self.spawn(move |tx, _, _| { let (s, now) = sys::stats(prev); let _ = tx.send(Msg::Stats(s, now)); });
         }
         let loading = self.spec.is_none() && self.scan_err.is_none() || !self.ps_ready || self.restore.is_none() && self.page == Page::Backup;
-        if !self.busy.is_empty() || self.running > 0 || loading || self.stats_pending || !self.toasts.is_empty() {
+        if !self.busy.is_empty() || self.running > 0 || loading || self.verifying || self.stats_pending || !self.toasts.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(100));
         } else if watching {
             ctx.request_repaint_after(Duration::from_secs(2));
@@ -783,7 +1023,7 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
         if hit.clicked() {
             ui.memory_mut(|m| m.toggle_popup(menu));
         }
-        let hit = if ui.memory(|m| m.is_popup_open(menu)) { hit } else { hit.on_hover_text("Cambiar imagen") };
+        let hit = if ui.memory(|m| m.is_popup_open(menu)) { hit } else { hit.on_hover_text("Imagen y tamaño de letra") };
         let mut pick = None;
         egui::popup::popup_below_widget(ui, menu, &hit, egui::PopupCloseBehavior::CloseOnClick, |ui| {
             ui.set_min_width(230.0);
@@ -797,6 +1037,16 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
             if self.avatar.is_some() && item(ui, ic::ARROW_COUNTER_CLOCKWISE, "Volver a la original") {
                 pick = Some(3);
             }
+            ui.separator();
+            ui.label(RichText::new("Tamaño de letra").size(12.5).color(MUTED));
+            ui.horizontal(|ui| {
+                for (z, t) in [(1.0, "100 %"), (1.15, "115 %"), (ZOOM_MAX, "130 %")] {
+                    let on = (ui.ctx().zoom_factor() - z).abs() < 0.01;
+                    if ui.add(egui::Button::new(RichText::new(t).size(13.0).color(if on { ACCENT } else { TEXT })).selected(on)).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        ui.ctx().set_zoom_factor(z);
+                    }
+                }
+            });
         });
         let ctx = ui.ctx().clone();
         match pick {
@@ -819,7 +1069,11 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
         ui.painter().text(brand.left_center() + Vec2::new(77.0, 13.0), Align2::LEFT_CENTER, "OPTIMIZER", semi(10.5), ACCENT);
         ui.add_space(6.0);
         for (i, (page, icon, name)) in NAV.iter().enumerate() {
-            if i == 6 {
+            // Modo seguro: solo Backups.
+            if self.safe && *page != Page::Backup {
+                continue;
+            }
+            if *page == Page::Backup && !self.safe {
                 let (r, _) = ui.allocate_exact_size(Vec2::new(full.width(), 10.0), Sense::hover());
                 ui.painter().hline(r.x_range().shrink(22.0), r.center().y, egui::Stroke::new(1.0_f32, LINE));
             }
@@ -851,13 +1105,13 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
         p.text(Pos2::new(pill.center().x, full.bottom() - 18.0), Align2::CENTER_CENTER, format!("v{}", env!("CARGO_PKG_VERSION")), regular(11.5), DIM);
     }
 
-    /// Atajos de teclado: Ctrl+1…7 secciones, Ctrl+F buscar, Ctrl+J consola, F5 escanear, Esc limpia la búsqueda.
+    /// Atajos de teclado: Ctrl+1…8 secciones, Ctrl+F buscar, Ctrl+J consola, F5 escanear, Esc limpia la búsqueda.
     fn keys(&mut self, ctx: &egui::Context) {
         use egui::{Key, Modifiers};
         if self.confirm.is_some() {
             return;
         }
-        let nums = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7];
+        let nums = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8];
         for (i, k) in nums.into_iter().enumerate() {
             if ctx.input_mut(|inp| inp.consume_key(Modifiers::CTRL, k)) {
                 self.actions.push(Action::Go(NAV[i].0, None));
@@ -873,9 +1127,19 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
             self.saved.console_open = !self.saved.console_open;
             self.save();
         }
+        // Ctrl+Shift+R: "Revertir todo" desde cualquier sección (con la confirmación de siempre).
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::R)) {
+            self.actions.push(Action::RevertAll);
+        }
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F5)) {
             self.actions.push(Action::Rescan);
         }
+        // Al volver a la ventana después de un rato, el estado se relee de fondo: pudo cambiar fuera de la app.
+        let focus = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        if focus && !self.had_focus && self.states_at.is_some_and(|t| t.elapsed() > Duration::from_secs(15 * 60)) {
+            self.actions.push(Action::Verify);
+        }
+        self.had_focus = focus;
         if !self.query.is_empty() && ctx.input(|i| i.key_pressed(Key::Escape)) {
             self.query.clear();
         }
@@ -913,9 +1177,11 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
                 if small(ui, "Limpiar").clicked() {
                     self.lines.clear();
                 }
-                if small(ui, "Copiar").clicked() {
-                    ui.ctx().copy_text(self.lines.iter().map(|l| format!("{} {}{}", l.t, plain(&l.lvl), l.msg)).collect::<Vec<_>>().join("\n"));
-                    self.toast("Registro copiado al portapapeles", GREEN, 3.0);
+                if small(ui, "Copiar diagnóstico").on_hover_text("Copia el registro con la versión, Windows y el hardware, listo para pegar en Discord o GitHub. Sin tu usuario ni el nombre de la PC. No se envía nada: solo va al portapapeles.").clicked() {
+                    let lines: Vec<String> = self.lines.iter().map(|l| format!("{} {}{}", l.t, plain(&l.lvl), l.msg)).collect();
+                    let report = diag::report(self.spec.as_ref(), self.admin, self.fake.as_deref(), &lines, &win::user_profile().display().to_string(), &std::env::var("COMPUTERNAME").unwrap_or_default());
+                    ui.ctx().copy_text(report);
+                    self.toast("Diagnóstico copiado al portapapeles", GREEN, 3.0);
                 }
                 if self.running > 0 && small(ui, "Cancelar").on_hover_text("Detener lo que está en curso").clicked() {
                     self.actions.push(Action::Cancel);
@@ -954,32 +1220,109 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
 
     fn overlays(&mut self, ctx: &egui::Context) {
         // Avisos abajo a la derecha.
-        self.toasts.retain(|t| t.2.elapsed().as_secs_f32() < t.3);
+        self.toasts.retain(|t| t.at.elapsed().as_secs_f32() < t.secs);
         let mut bottom = if self.saved.console_open { 300.0 } else { 52.0 };
+        let mut undone = None;
         // Un Area por aviso, apilados de abajo hacia arriba. Un Area, aunque no sea interactivo, tapa los clics de todo
-        // lo que queda debajo de su rectángulo: con uno solo en bottom_up ocupaba la columna derecha entera.
-        for (i, (msg, color, at, secs)) in self.toasts.iter().rev().enumerate() {
-            let shown = egui::Area::new(egui::Id::new(("toast", i))).anchor(egui::Align2::RIGHT_BOTTOM, [-22.0, -bottom]).interactable(false).show(ctx, |ui| {
+        // lo que queda debajo de su rectángulo: con uno solo en bottom_up ocupaba la columna derecha entera. Solo los
+        // que traen "Deshacer" reciben clics, y solo en su propio rectángulo.
+        let n = self.toasts.len();
+        for (i, t) in self.toasts.iter().rev().enumerate() {
+            let shown = egui::Area::new(egui::Id::new(("toast", i))).anchor(egui::Align2::RIGHT_BOTTOM, [-22.0, -bottom]).interactable(t.undo.is_some()).show(ctx, |ui| {
                 // Aparece y se va con un fundido corto.
-                let age = at.elapsed().as_secs_f32();
-                let alpha = (age / 0.15).min(1.0).min((secs - age) / 0.4).clamp(0.0, 1.0);
-                let icon = if *color == GREEN { ic::CHECK_CIRCLE } else if *color == RED { ic::WARNING_CIRCLE } else { ic::INFO };
+                let age = t.at.elapsed().as_secs_f32();
+                let alpha = (age / 0.15).min(1.0).min((t.secs - age) / 0.4).clamp(0.0, 1.0);
+                let icon = if t.color == GREEN { ic::CHECK_CIRCLE } else if t.color == RED { ic::WARNING_CIRCLE } else { ic::INFO };
                 ui.multiply_opacity(alpha);
                 let r = egui::Frame::new().fill(Color32::from_rgb(27, 36, 67)).stroke(egui::Stroke::new(1.0_f32, LINE)).corner_radius(10).inner_margin(egui::Margin { left: 18, right: 16, top: 12, bottom: 12 }).show(ui, |ui| {
-                    ui.set_max_width(420.0);
-                    // Ícono y texto en un solo bloque: un layout horizontal acá se estira a toda la altura.
-                    let mut job = egui::text::LayoutJob::default();
-                    job.append(icon, 0.0, egui::TextFormat { font_id: regular(15.0), color: *color, ..Default::default() });
-                    job.append(msg, 9.0, egui::TextFormat { font_id: regular(13.5), color: TEXT, ..Default::default() });
-                    ui.add(egui::Label::new(job).wrap());
+                    ui.set_max_width(if t.undo.is_some() { 500.0 } else { 420.0 });
+                    ui.horizontal(|ui| {
+                        if t.undo.is_some() {
+                            // El botón primero (a la derecha) y el texto en lo que sobra.
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.spacing_mut().button_padding = Vec2::new(12.0, 4.0);
+                                let b = egui::Button::new(RichText::new("Deshacer").font(semi(13.0)).color(ACCENT)).fill(CARD2).stroke(egui::Stroke::new(1.0_f32, LINE)).corner_radius(8);
+                                if ui.add(b).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                    undone = Some(n - 1 - i);
+                                }
+                                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| toast_text(ui, icon, t));
+                            });
+                        } else {
+                            toast_text(ui, icon, t);
+                        }
+                    });
                 });
                 let bar = Rect::from_min_size(r.response.rect.min, Vec2::new(4.0, r.response.rect.height()));
-                ui.painter().rect_filled(bar, egui::CornerRadius { nw: 10, sw: 10, ne: 0, se: 0 }, *color);
+                ui.painter().rect_filled(bar, egui::CornerRadius { nw: 10, sw: 10, ne: 0, se: 0 }, t.color);
             });
             bottom += shown.response.rect.height() + 8.0;
         }
+        if let Some(i) = undone {
+            if let Some(a) = self.toasts.remove(i).undo {
+                self.actions.push(a);
+            }
+        }
+        // "Qué cambia" de un tweak (#9): lo que dice el catálogo; la fuente es una página oficial revisada a mano (INFO en tweaks.js).
+        if let Some(t) = self.detail.as_ref().and_then(|id| self.cat.tweak(id)).cloned() {
+            let mut close = false;
+            egui::Modal::new(egui::Id::new("detail")).frame(panel()).show(ctx, |ui| {
+                ui.set_width(620.0);
+                ui.add(egui::Label::new(RichText::new(&t.name).font(semi(17.0))).wrap());
+                let changes = t.changes();
+                // Con letra grande o mucho detalle no entra en la pantalla: el cuerpo se desplaza y los botones quedan fijos.
+                let room = (ui.ctx().screen_rect().height() - 190.0).max(200.0);
+                egui::ScrollArea::vertical().max_height(room).auto_shrink([false, true]).show(ui, |ui| {
+                    ui.add(egui::Label::new(RichText::new(&t.desc).size(14.0).color(Color32::from_rgb(200, 208, 226))).wrap());
+                    let mut facts = vec![self.cat.cat_name(&t.cat).to_string(), if t.risk == "low" { "Riesgo bajo".into() } else { "Riesgo medio".into() }];
+                    if t.reboot {
+                        facts.push("Necesita reiniciar".into());
+                    }
+                    ui.label(RichText::new(facts.join(" · ")).size(12.5).color(MUTED));
+                    if let Some(d) = &t.details {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("Cómo funciona").font(semi(14.0)));
+                        ui.add(egui::Label::new(RichText::new(d).size(13.5)).wrap());
+                    }
+                    if let Some(u) = &t.source {
+                        let link = egui::Button::new(RichText::new(format!("{}  Fuente oficial", ic::ARROW_SQUARE_OUT)).size(13.0).color(ACCENT)).frame(false);
+                        if ui.add(link).on_hover_text(u).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                            crate::win::open_url(u);
+                        }
+                    }
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("Qué cambia").font(semi(14.0)));
+                    for c in &changes {
+                        ui.add(egui::Label::new(RichText::new(format!("• {c}")).font(mono(12.5))).wrap());
+                    }
+                    if let Some(ps) = &t.ps {
+                        egui::Frame::new().fill(CARD).stroke(egui::Stroke::new(1.0_f32, LINE)).corner_radius(10).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+                            egui::ScrollArea::vertical().id_salt("script").max_height(220.0).auto_shrink([false, true]).show(ui, |ui| {
+                                ui.add(egui::Label::new(RichText::new(&ps.apply).font(mono(11.5)).color(MUTED)).wrap());
+                            });
+                        });
+                    }
+                });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if button(ui, "Copiar detalle", Btn::Primary).clicked() {
+                        let script = t.ps.as_ref().map_or(String::new(), |ps| format!("\n\nScript:\n{}", ps.apply));
+                        let how = t.details.as_ref().map_or(String::new(), |d| format!("\n\nCómo funciona:\n{d}"));
+                        let src = t.source.as_ref().map_or(String::new(), |u| format!("\nFuente: {u}"));
+                        ui.ctx().copy_text(format!("{}\n{}{how}{src}\n\nQué cambia:\n- {}{script}", t.name, t.desc, changes.join("\n- ")));
+                        self.toasts.push(Toast { msg: "Detalle copiado.".into(), color: GREEN, at: Instant::now(), secs: 3.0, undo: None });
+                    }
+                    if button(ui, "Cerrar", Btn::Ghost).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        close = true;
+                    }
+                });
+            });
+            if close {
+                self.detail = None;
+            }
+        }
         // Confirmación.
         let mut answer = None;
+        let mut with_rp = false;
         let mut selected = usize::MAX; // en lote: cuántas quedaron tildadas
         if let Some(c) = &self.confirm {
             egui::Modal::new(egui::Id::new("confirm")).frame(panel()).show(ctx, |ui| {
@@ -994,7 +1337,7 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
                     Action::ManyNow(ids) => head.replacen(&ids.len().to_string(), &ids.iter().filter(|id| !self.confirm_skip.contains(*id)).count().to_string(), 1),
                     _ => head.to_string(),
                 };
-                ui.add(egui::Label::new(RichText::new(head).font(semi(17.0))).wrap());
+                ui.add(egui::Label::new(RichText::new(&head).font(semi(17.0))).wrap());
                 if !body.is_empty() {
                     ui.add(egui::Label::new(RichText::new(body).size(14.0).color(Color32::from_rgb(200, 208, 226))).wrap());
                 }
@@ -1049,9 +1392,15 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
                     ui.label(RichText::new("¿Continuar?").size(14.0));
                 }
                 ui.add_space(8.0);
+                // Al aplicar en lote se ofrece crear antes el punto de restauración (no al revertir, ni si recién falló).
+                let offer_rp = many && !head.starts_with("Se van a revertir") && !head.starts_with("No se pudo");
                 ui.horizontal(|ui| {
-                    let label = if selected == usize::MAX { "Continuar".to_string() } else { format!("Continuar con {selected}") };
-                    if ui.add_enabled_ui(selected > 0, |ui| button(ui, &label, Btn::Primary)).inner.clicked() {
+                    if offer_rp && ui.add_enabled_ui(selected > 0, |ui| button(ui, "Crear punto y continuar", Btn::Primary)).inner.on_hover_text("Crea un punto de restauración y, cuando Windows termina, aplica las tildadas").clicked() {
+                        answer = Some(true);
+                        with_rp = true;
+                    }
+                    let label = if selected == usize::MAX { "Continuar".to_string() } else if offer_rp { "Solo continuar".to_string() } else { format!("Continuar con {selected}") };
+                    if ui.add_enabled_ui(selected > 0, |ui| button(ui, &label, if offer_rp { Btn::Ghost } else { Btn::Primary })).inner.clicked() {
                         answer = Some(true);
                     }
                     if button(ui, "Cancelar", Btn::Ghost).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -1066,8 +1415,16 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
             if let Action::ManyNow(ids) = &mut c.action {
                 ids.retain(|id| !skip.contains(id));
             }
-            if yes {
-                self.actions.push(c.action);
+            match c.action {
+                // Si ya hay un punto creándose, el lote espera a ese mismo.
+                Action::ManyNow(ids) if yes && with_rp => {
+                    self.after_restore = Some(ids);
+                    if !self.busy.contains("rp") {
+                        self.actions.push(Action::CreateRestore);
+                    }
+                }
+                a if yes => self.actions.push(a),
+                _ => {}
             }
         }
     }
@@ -1088,7 +1445,17 @@ Se va a reiniciar en 5 segundos. Guardá lo que tengas abierto.
         if ready && self.frames == 0 && self.confirm.is_none() && win::test_env("BX_CONFIRM").is_some() {
             let ids = self.cat.tweaks.iter().filter(|t| t.risk == "low").map(|t| t.id.clone()).collect::<Vec<_>>();
             self.confirm_skip.extend(ids.iter().take(2).cloned()); // para ver casillas destildadas
-            self.confirm = Some(Confirm { text: format!("Se van a activar {} optimizaciones.\n\nConviene crear antes un punto de restauración (sección Backups).\n\n¿Continuar?", ids.len()), action: Action::ManyNow(ids) });
+            self.confirm = Some(Confirm { text: format!("Se van a activar {} optimizaciones.\n\n{RP_HINT}\n\n¿Continuar?", ids.len()), action: Action::ManyNow(ids) });
+        }
+        // BX_UNDO=1: muestra el aviso de un cambio con su botón "Deshacer" (no aplica nada).
+        if ready && self.frames == 0 && self.toasts.is_empty() && win::test_env("BX_UNDO").is_some() {
+            let id = self.cat.tweaks[0].id.clone();
+            let msg = format!("Activado: {}", self.cat.tweaks[0].name);
+            self.toasts.push(Toast { msg, color: GREEN, at: Instant::now(), secs: 60.0, undo: Some(Action::Toggle(id)) });
+        }
+        // BX_DETAIL=id: abre el panel "Qué cambia" de ese tweak.
+        if ready && self.frames == 0 && self.detail.is_none() {
+            self.detail = win::test_env("BX_DETAIL");
         }
         if ready && self.busy.is_empty() {
             self.frames += 1;
@@ -1114,8 +1481,18 @@ impl eframe::App for App {
         if let (Some(o), Some(inn), Some(max), Some(false)) = vp {
             self.saved.maximized = max;
             if !max {
-                self.saved.win = Some([o.min.x, o.min.y, inn.width(), inn.height()]);
+                // egui da la ventana en puntos con zoom; se guarda sin zoom, como la espera el arranque.
+                let z = ctx.zoom_factor();
+                self.saved.win = Some([o.min.x * z, o.min.y * z, inn.width() * z, inn.height() * z]);
             }
+        }
+        // Tamaño de letra: Ctrl+más/menos de egui también lo cambia, pero dentro del rango.
+        let z = ctx.zoom_factor();
+        if !(1.0..=ZOOM_MAX).contains(&z) {
+            ctx.set_zoom_factor(z.clamp(1.0, ZOOM_MAX));
+        } else if (z - self.saved.zoom).abs() > 0.001 {
+            self.saved.zoom = z;
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(Vec2::new(MIN_W, MIN_H))); // en puntos: crece con el zoom
         }
         egui::SidePanel::left("nav").exact_width(SIDE_W).resizable(false).show_separator_line(false).frame(egui::Frame::new().fill(SIDE)).show(ctx, |ui| {
             ui.spacing_mut().item_spacing = Vec2::new(0.0, 4.0);
@@ -1155,4 +1532,51 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) { App::save(self); }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn el_hover_rechequea_una_sola_vez() {
+        let (min, s) = (|m: u64| Some(Duration::from_secs(m * 60)), Duration::from_secs);
+        // Estado viejo, nunca re-chequeado y nada en curso: sí.
+        assert!(should_recheck(min(6), None, false));
+        // Estado fresco o todavía sin leer: no.
+        assert!(!should_recheck(min(2), None, false) && !should_recheck(None, None, false));
+        // Ya hay uno en curso (pasar el mouse por toda la lista): no se abre otro.
+        assert!(!should_recheck(min(6), None, true));
+        // El mismo interruptor hace menos de 5 min: no; más de 5 min: sí.
+        assert!(!should_recheck(min(6), Some(s(30)), false));
+        assert!(should_recheck(min(20), min(6), false));
+    }
+
+    #[test]
+    fn modo_seguro_solo_deja_revertir() {
+        let on = |id: &str| id == "gamemode";
+        for a in [Action::RevertAll, Action::CreateRestore, Action::OpenRestore, Action::Go(Page::Backup, None), Action::Toggle("gamemode".into()), Action::Reboot, Action::Verify] {
+            assert!(safe_allows(&a, &on));
+        }
+        // Encender algo apagado, aplicar en lote, limpiar, actualizar o ir a otra sección: no.
+        for a in [Action::Toggle("hags".into()), Action::ToggleNow("hags".into()), Action::Many(vec!["hags".into()], "aplicar"), Action::RunBoost("temp".into()), Action::UpdateNow, Action::Go(Page::Tweaks, None), Action::Startup(0)] {
+            assert!(!safe_allows(&a, &on));
+        }
+    }
+
+    #[test]
+    fn revertible_es_lo_activo_con_respaldo_o_aplicado_desde_aca() {
+        let cat = Catalog::load();
+        let t = std::time::SystemTime::now();
+        let backups = vec![("gamemode".to_string(), t), ("niclatency-nic".to_string(), t), ("no-existe".to_string(), t)];
+        let applied: HashSet<String> = ["hags".to_string(), "gamedvr".to_string()].into();
+        let ids = reversible_ids(&cat, &|id| id != "gamedvr", &backups, &applied);
+        // gamedvr está apagado; un id que no es del catálogo se ignora; "-nic" se une con su tweak.
+        let mut expected: Vec<String> = ["gamemode", "hags"].iter().map(|s| s.to_string()).collect();
+        if cat.tweak("niclatency").is_some() {
+            expected.push("niclatency".into());
+        }
+        expected.sort();
+        assert_eq!(ids, expected);
+    }
 }

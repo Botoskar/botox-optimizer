@@ -1,7 +1,8 @@
 //! Las pantallas: Inicio, Optimizaciones, Debloat, Escáner, Boost-Up y Backups.
 use crate::catalog::Tweak;
 use crate::theme::*;
-use crate::{sys, unix_now, Action, App, Page};
+use crate::{engine, sys, unix_now, Action, App, Msg, Page};
+use std::time::Instant;
 use eframe::egui::{self, Align, Align2, Color32, Label, Layout, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2};
 use egui_phosphor::regular as ic;
 use serde_json::Value;
@@ -12,9 +13,55 @@ const CARD_H: f32 = 236.0;
 fn s(v: &Value) -> &str { v.as_str().unwrap_or_default() }
 fn n(v: &Value) -> f64 { v.as_f64().unwrap_or(0.0) }
 
-fn ago(unix: u64) -> String {
-    let m = unix_now().saturating_sub(unix) / 60;
+fn ago(unix: u64) -> String { ago_secs(unix_now().saturating_sub(unix)) }
+
+fn ago_secs(secs: u64) -> String {
+    let m = secs / 60;
     match m { 0 => "recién".into(), 1..=59 => format!("hace {m} min"), 60..=1439 => format!("hace {} h", m / 60), _ => format!("hace {} d", m / 1440) }
+}
+
+/// Página Solucionar (#3): tweaks del catálogo agrupados por el problema que se quiere arreglar. No agrega tweaks;
+/// `cat:x` toma una categoría entera. (ícono, problema, explicación, ids)
+const FIXES: &[(&str, &str, &str, &[&str])] = &[
+    (ic::WAVE_SAWTOOTH, "El juego se tironea", "Microcortes aunque los FPS promedio estén bien.", &["fso", "windowedopt", "memcompress", "sysmain", "svchost", "lastaccess", "8dot3"]),
+    (ic::GAUGE, "Tengo menos FPS de los que debería", "El procesador o la placa de video no rinden todo lo que pueden.", &["ultimate", "gamemode", "hags", "gamedvr", "vbs", "powerthrottle", "cpuboost", "cpumin"]),
+    (ic::WIFI_HIGH, "Lag o ping alto en juegos online", "Retardo de red que agrega Windows por su cuenta.", &["nagle", "tcpparams", "qos", "netthrottle", "niclatency", "dns"]),
+    (ic::HARD_DRIVES, "La PC está lenta de fondo", "Indexación, telemetría y apps que usan disco y CPU sin que las abras.", &["wsearch", "sysmain", "diagtrack", "telemetrytasks", "bgapps"]),
+    (ic::TIMER, "Tarda en arrancar", "Además de esto, en Arranque podés apagar los programas que inician con Windows.", &["startupdelay"]),
+    (ic::SHIELD_CHECK, "Me preocupa mi privacidad", "Telemetría, publicidad personalizada e historial que Windows manda o guarda.", &["cat:privacy"]),
+    (ic::BELL_SLASH, "Avisos y publicidad que molestan", "Sugerencias, anuncios y Bing metidos en Windows.", &["ads", "lockads", "bing", "widgets", "tailored"]),
+];
+
+/// Los tweaks de un grupo de Solucionar, en el orden del grupo (los `cat:` en el orden del catálogo).
+fn fix_tweaks<'a>(cat: &'a crate::catalog::Catalog, ids: &[&str]) -> Vec<&'a Tweak> {
+    let mut v: Vec<&Tweak> = Vec::new();
+    for id in ids {
+        match id.strip_prefix("cat:") {
+            Some(c) => v.extend(cat.tweaks.iter().filter(|t| t.cat == c)),
+            None => v.extend(cat.tweak(id)),
+        }
+    }
+    v
+}
+
+#[cfg(test)]
+mod tests {
+    /// Un id mal escrito en Solucionar dejaría el grupo con menos ajustes sin que nadie lo note.
+    #[test]
+    fn solucionar_solo_usa_ids_del_catalogo() {
+        let cat = crate::catalog::Catalog::load();
+        for (_, name, _, ids) in super::FIXES {
+            for id in *ids {
+                assert!(!super::fix_tweaks(&cat, &[id]).is_empty(), "{name}: {id} no existe en el catálogo");
+            }
+        }
+    }
+
+    #[test]
+    fn hace_cuanto_en_palabras() {
+        use super::ago_secs;
+        assert_eq!([ago_secs(0), ago_secs(59), ago_secs(60), ago_secs(59 * 60 + 59), ago_secs(3600), ago_secs(23 * 3600 + 3599), ago_secs(86_400 * 3)], ["recién", "recién", "hace 1 min", "hace 59 min", "hace 1 h", "hace 23 h", "hace 3 d"]);
+    }
 }
 
 /// "AMD Ryzen 5 5600 6-Core Processor" → "AMD Ryzen 5 5600".
@@ -92,6 +139,17 @@ impl App {
             });
             return;
         }
+        if self.safe {
+            egui::Frame::new().fill(Color32::from_rgb(20, 34, 67)).stroke(Stroke::new(1.0_f32, BLUE)).corner_radius(12).inner_margin(egui::Margin::symmetric(18, 9)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(ic::LIFEBUOY).size(18.0).color(BLUE));
+                    ui.label(RichText::new("Modo seguro").font(semi(14.0)));
+                    ui.label(muted("Solo se pueden revertir los cambios hechos por Botox Optimizer. Cerrá y abrí la app normal para volver."));
+                });
+            });
+            ui.add_space(10.0);
+        }
         if let Some(k) = self.fake.clone() {
             let (que, tip) = match k.as_str() {
                 "amd" => ("Ryzen 7 5700 + Radeon RX 7600", "Como la PC de un amigo con Radeon."),
@@ -167,6 +225,7 @@ impl App {
             Page::Home => self.home(ui),
             Page::Scan => self.scan_page(ui),
             Page::Tweaks => self.tweak_page(ui, "Optimizaciones", "ajustes de FPS, latencia, red, registro y privacidad. Todos se pueden revertir.", &[]),
+            Page::Fix => self.fix_page(ui),
             Page::Debloat => self.tweak_page(ui, "Debloat", "Quitá apps preinstaladas y servicios que corren de fondo sin que los uses.", &["debloat", "svc"]),
             Page::Boost => self.boost_page(ui),
             Page::Startup => self.startup_page(ui),
@@ -219,8 +278,35 @@ impl App {
     fn switch(&mut self, ui: &mut Ui, t: &Tweak) {
         let busy = self.busy.contains(&t.id) || !self.state.contains_key(&t.id);
         let tip = if self.on(&t.id) { "Revertir" } else { "Activar" };
-        if toggle(ui, &t.id, self.on(&t.id), busy, t.applies(&self.facts)).on_hover_text(tip).clicked() {
+        let r = toggle(ui, &t.id, self.on(&t.id), busy, t.applies(&self.facts)).on_hover_text(tip);
+        if r.clicked() {
             self.actions.push(Action::Toggle(t.id.clone()));
+        }
+        if r.hovered() && !busy {
+            self.recheck(&t.id);
+        }
+    }
+
+    /// Re-lee el estado real de un tweak de fondo, con los límites de `should_recheck` (#10).
+    fn recheck(&mut self, id: &str) {
+        if !crate::should_recheck(self.states_at.map(|t| t.elapsed()), self.rechecked.get(id).map(|t| t.elapsed()), self.rechecking) {
+            return;
+        }
+        self.rechecking = true;
+        self.rechecked.insert(id.to_string(), Instant::now());
+        let id = id.to_string();
+        self.spawn(move |tx, _, cat| {
+            let st = cat.tweak(&id).and_then(|t| engine::check(&cat, t));
+            let _ = tx.send(Msg::Rechecked(id, st));
+        });
+    }
+
+    /// Nombre de un tweak: al hacer clic abre "Qué cambia" (#9).
+    fn tweak_name(&mut self, ui: &mut Ui, t: &Tweak, text: RichText, wrap: bool) {
+        let l = Label::new(text).sense(Sense::click());
+        let r = ui.add(if wrap { l.wrap() } else { l.truncate() }).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Ver qué cambia");
+        if r.clicked() {
+            self.detail = Some(t.id.clone());
         }
     }
 
@@ -233,7 +319,7 @@ impl App {
                 self.switch(ui, t);
                 ui.with_layout(Layout::top_down(Align::Min), |ui| {
                     ui.spacing_mut().item_spacing.y = 1.0;
-                    ui.add(Label::new(RichText::new(&t.name).font(semi(14.0))).truncate());
+                    self.tweak_name(ui, t, RichText::new(&t.name).font(semi(14.0)), false);
                     ui.add(Label::new(RichText::new(&t.desc).size(12.5).color(MUTED)).truncate());
                     if !why.is_empty() {
                         ui.label(RichText::new(&why).size(12.0).color(ACCENT2));
@@ -298,6 +384,8 @@ impl App {
                 chip(ui, "RAM", &format!("{} GB", f.ram_gb));
                 chip(ui, "C:", &format!("{} GB libres", f.c_free_gb));
             });
+            ui.add_space(10.0);
+            self.one_click(ui, &f, &spec);
             ui.add_space(10.0);
             let st = self.stats.clone();
             columns(ui, 3, 12.0, |c| {
@@ -365,14 +453,10 @@ impl App {
                     self.row(ui, t, true);
                 }
                 ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    if !pending.is_empty() && button(ui, &format!("Aplicar las {} recomendadas", pending.len()), Btn::Primary).clicked() {
-                        self.actions.push(Action::Many(pending.iter().map(|t| t.id.clone()).collect(), "aplicar"));
-                    }
-                    if button(ui, "Ver todas", Btn::Ghost).clicked() {
-                        self.actions.push(Action::Go(Page::Tweaks, Some("rec")));
-                    }
-                });
+                // Aplicarlas en lote es el botón "Optimizar para juegos" de la izquierda (una sola selección, con sus reglas).
+                if button(ui, "Ver todas", Btn::Ghost).clicked() {
+                    self.actions.push(Action::Go(Page::Tweaks, Some("rec")));
+                }
             });
             ui.add_space(12.0);
             title(ui, "Atajos");
@@ -390,6 +474,32 @@ impl App {
                     }
                 }
             });
+        });
+    }
+
+    /// Botón principal de Inicio: aplica en un paso las recomendadas de bajo riesgo (o también las de riesgo medio),
+    /// pasando por la confirmación de lote de siempre, donde se puede destildar cada una.
+    fn one_click(&mut self, ui: &mut Ui, f: &crate::catalog::Facts, spec: &Value) {
+        let ids = crate::catalog::one_click_ids(&self.cat, f, &self.state, self.one_click_medium);
+        let ready = self.ps_ready;
+        let label = if !ready { "Leyendo el estado de tu PC…".to_string() } else if ids.is_empty() { "Tu PC ya está optimizada".to_string() } else { format!("{}  Optimizar para juegos", ic::LIGHTNING) };
+        ui.add_enabled_ui(ready && !ids.is_empty(), |ui| {
+            ui.spacing_mut().button_padding = Vec2::new(24.0, 12.0);
+            let b = egui::Button::new(RichText::new(label).font(semi(16.0)).color(Color32::WHITE)).fill(ACCENT).corner_radius(12).min_size(Vec2::new(ui.available_width(), 50.0));
+            if ui.add(b).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                self.actions.push(Action::Many(ids.clone(), "aplicar"));
+            }
+        });
+        if ready && !ids.is_empty() {
+            let gpu = s(&sys::main_gpu(spec)["name"]).to_string();
+            let what = if self.one_click_medium { "ajustes recomendados" } else { "ajustes seguros" };
+            ui.label(muted(format!("Aplica {} {what} para tu {} con {}. Antes de aplicar podés revisar la lista.", ids.len(), cpu_short(s(&spec["cpu"]["name"])), if gpu.is_empty() { "tu placa de video".into() } else { gpu })));
+        }
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.one_click_medium, RichText::new("Incluir también las de riesgo medio").size(13.0).color(MUTED));
+            if self.one_click_medium {
+                ui.label(RichText::new(format!("{} Pueden tener efectos secundarios: leé cada una antes de confirmar.", ic::WARNING)).size(12.5).color(YELLOW));
+            }
         });
     }
 
@@ -419,6 +529,7 @@ impl App {
             }
             self.search(ui);
         });
+        self.state_age(ui);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::splat(6.0);
             ui.spacing_mut().button_padding = Vec2::new(14.0, 6.0);
@@ -458,6 +569,82 @@ impl App {
                 }
             });
         }
+    }
+
+    // ── Solucionar ──
+
+    /// Grupos por problema: se abren para ver los ajustes y aplicar los que faltan (riesgo medio, destildados).
+    fn fix_page(&mut self, ui: &mut Ui) {
+        let (cat, f) = (self.cat.clone(), self.facts.clone());
+        header(ui, "Solucionar un problema", "Elegí lo que te pasa y te mostramos los ajustes que lo atacan. Son los mismos de Optimizaciones: todos se pueden revertir.", |_| {});
+        self.state_age(ui);
+        ui.add_space(4.0);
+        ui.spacing_mut().item_spacing.y = 10.0;
+        for (i, (icon, name, desc, ids)) in FIXES.iter().enumerate() {
+            // Solo los que corresponden a esta PC (fuera los "no aplica"). Ningún grupo usa tweaks de notebook.
+            let list: Vec<&Tweak> = fix_tweaks(&cat, ids).into_iter().filter(|t| t.applies(&f)).collect();
+            let done = list.iter().filter(|t| self.on(&t.id)).count();
+            let todo: Vec<String> = list.iter().filter(|t| self.state.get(&t.id) == Some(&false)).map(|t| t.id.clone()).collect();
+            egui::Frame::new().fill(CARD).stroke(Stroke::new(1.0_f32, LINE)).corner_radius(12).inner_margin(egui::Margin::symmetric(18, 12)).show(ui, |ui| {
+                let id = ui.make_persistent_id(("fix", i));
+                let mut flip = false; // clic en el ícono o el título: abre o cierra, igual que la flecha
+                egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
+                    .show_header(ui, |ui| {
+                        let hand = |r: egui::Response| r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
+                        flip |= hand(ui.add(Label::new(RichText::new(*icon).size(26.0).color(ACCENT)).sense(Sense::click())));
+                        ui.add_space(6.0);
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            flip |= hand(ui.add(Label::new(RichText::new(*name).font(semi(15.0))).sense(Sense::click())));
+                            ui.add(Label::new(RichText::new(*desc).size(12.5).color(MUTED)).wrap());
+                        });
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if !todo.is_empty() && button(ui, &format!("Aplicar {}", todo.len()), Btn::Primary).clicked() {
+                                // Las de riesgo medio, destildadas (solo si la confirmación va a aparecer: sin admin, Many solo avisa).
+                                if self.admin && self.confirm.is_none() && self.after_restore.is_none() {
+                                    self.confirm_skip = todo.iter().filter(|id| cat.tweak(id).is_some_and(|t| t.risk != "low")).cloned().collect();
+                                }
+                                self.actions.push(Action::Many(todo.clone(), "aplicar"));
+                            }
+                            let (txt, col) = if list.is_empty() { ("No aplica a esta PC".to_string(), DIM) } else { (format!("{done} de {} activos", list.len()), if done == list.len() { GREEN } else { MUTED }) };
+                            ui.label(RichText::new(txt).size(12.5).color(col));
+                        });
+                    })
+                    .body(|ui| {
+                        ui.spacing_mut().item_spacing.y = 8.0;
+                        for t in &list {
+                            self.row(ui, t, false);
+                        }
+                        if *name == "Tarda en arrancar" && button(ui, "Ir a Arranque", Btn::Ghost).clicked() {
+                            self.actions.push(Action::Go(Page::Startup, None));
+                        }
+                    });
+                if flip {
+                    let mut s = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+                    s.toggle(ui);
+                    s.store(ui.ctx());
+                }
+            });
+        }
+    }
+
+    /// "Estado leído hace X" y "Verificar ahora": lo que se cambie fuera de la app no se ve hasta releerlo.
+    fn state_age(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let text = match (self.verifying, self.states_at) {
+                (true, _) => "Verificando el estado…".to_string(),
+                (false, Some(t)) => format!("Estado leído {}", ago_secs(t.elapsed().as_secs())),
+                (false, None) => "Leyendo el estado…".to_string(),
+            };
+            ui.label(RichText::new(format!("{}  {text}", ic::CLOCK)).size(12.5).color(DIM)).on_hover_text("Los cambios hechos fuera de Botox Optimizer no se ven hasta que se vuelve a verificar. Pasa solo si volvés a la ventana después de 15 minutos.");
+            if self.verifying || !self.ps_ready {
+                ui.add(egui::Spinner::new().size(12.0).color(ACCENT));
+            } else if ui.add(Label::new(RichText::new("Verificar ahora").size(12.5).color(ACCENT2)).sense(Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                self.actions.push(Action::Verify);
+            }
+        });
+        ui.add_space(6.0);
     }
 
     /// Buscador con ícono, borde naranja al escribir y botón para borrar. Ctrl+F lo enfoca.
@@ -505,7 +692,7 @@ impl App {
         body.set_clip_rect(body_rect.intersect(ui.clip_rect()));
         body.spacing_mut().item_spacing.y = 6.0;
         badge(&mut body, self.cat.cat_name(&t.cat), MUTED, CHIP_BG);
-        body.add(Label::new(RichText::new(&t.name).font(semi(16.0))).wrap());
+        self.tweak_name(&mut body, t, RichText::new(&t.name).font(semi(16.0)), true);
         body.add(Label::new(RichText::new(&t.desc).size(13.0).color(MUTED)).wrap());
         let why = t.reason(&self.facts);
         if !ok {
@@ -562,6 +749,26 @@ impl App {
                         ui.spacing_mut().item_spacing.y = 1.0;
                         ui.label(RichText::new(t).font(semi(14.0)));
                         ui.add(Label::new(muted(d)).wrap());
+                    });
+                });
+            }
+            // Driver de video: no se compara con "la última" (no hay una fuente oficial y estable para eso); se
+            // muestra el instalado y un acceso a la página oficial del fabricante.
+            if let Some(url) = crate::diag::driver_url(&f.gpu_vendor) {
+                ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top() - 4.0, Stroke::new(1.0_f32, LINE));
+                let g = sys::main_gpu(&spec);
+                ui.horizontal(|ui| {
+                    let (dot, _) = ui.allocate_exact_size(Vec2::new(12.0, 20.0), Sense::hover());
+                    ui.painter().text(dot.center(), Align2::CENTER_CENTER, ic::GRAPHICS_CARD, regular(15.0), BLUE);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if button(ui, &format!("{}  Buscar driver de {}", ic::ARROW_SQUARE_OUT, f.gpu_vendor), Btn::Ghost).on_hover_text(url).clicked() {
+                            crate::win::open_url(url);
+                        }
+                        ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            ui.label(RichText::new(format!("Driver de video: {}", s(&g["driver"]))).font(semi(14.0)));
+                            ui.add(Label::new(muted("Un driver al día suele dar más FPS y menos errores. Compará tu versión con la última en la página oficial y bajala de ahí.")).wrap());
+                        });
                     });
                 });
             }
@@ -656,6 +863,10 @@ impl App {
     fn boost_page(&mut self, ui: &mut Ui) {
         header(ui, "Boost-Up", "Limpiezas y mantenimiento para correr cada tanto", |_| {});
         let cat = self.cat.clone();
+        if cat.boosts.is_empty() {
+            ui.label(muted("No hay limpiezas configuradas."));
+            return;
+        }
         columns(ui, 2, 22.0, |c| {
             let ui = &mut c[0];
             for (i, b) in cat.boosts.iter().enumerate() {
@@ -711,6 +922,21 @@ impl App {
 
     // ── Backups ──
 
+    /// Guarda las optimizaciones activas en un .botox. Solo lectura: no toca la PC.
+    fn export_profile(&mut self) {
+        let applied: Vec<String> = self.cat.tweaks.iter().filter(|t| self.on(&t.id)).map(|t| t.id.clone()).collect();
+        if applied.is_empty() {
+            return self.toast("No hay optimizaciones activas para exportar.", ACCENT, 4.0);
+        }
+        let pc_summary = self.spec.as_ref().map(|sp| format!("{} + {}, {} GB", cpu_short(s(&sp["cpu"]["name"])), s(&sys::main_gpu(sp)["name"]), self.facts.ram_gb)).unwrap_or_default();
+        let Some(path) = rfd::FileDialog::new().set_title("Guardar perfil").add_filter("Perfil de Botox Optimizer", &["botox"]).set_file_name("mi-perfil.botox").save_file() else { return };
+        let p = crate::profile::Profile { version: env!("CARGO_PKG_VERSION").into(), applied, saved_at: unix_now(), pc_summary };
+        match crate::profile::export(&p, &path) {
+            Ok(()) => self.toast(format!("Perfil guardado con {} optimizaciones.", p.applied.len()), GREEN, 4.0),
+            Err(e) => self.toast(e, RED, 6.0),
+        }
+    }
+
     fn backup_page(&mut self, ui: &mut Ui) {
         let creating = self.busy.contains("rp");
         header(ui, "Backups", "Cada cambio guarda antes los valores originales.", |ui| {
@@ -765,6 +991,12 @@ impl App {
                     if button(ui, "Revertir todo", Btn::Danger).clicked() {
                         self.actions.push(Action::RevertAll);
                     }
+                    if button(ui, "Importar perfil", Btn::Ghost).on_hover_text("Aplica las optimizaciones de un perfil .botox (por ejemplo, después de formatear).").clicked() {
+                        self.actions.push(Action::ImportProfile);
+                    }
+                    if button(ui, "Exportar perfil", Btn::Ghost).on_hover_text("Guarda en un archivo .botox qué optimizaciones tenés activas, para reaplicarlas después.").clicked() {
+                        self.export_profile();
+                    }
                 });
             });
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -781,6 +1013,28 @@ impl App {
                 let mut right = ui.new_child(UiBuilder::new().max_rect(r.shrink2(Vec2::new(16.0, 0.0))).layout(Layout::right_to_left(Align::Center)));
                 self.switch(&mut right, t);
             }
+        });
+        ui.add_space(10.0);
+        // La salida de emergencia, visible antes de necesitarla.
+        let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "Botox Optimizer.exe".into());
+        let safe_cmd = format!("\"{exe}\" --safe");
+        panel().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(ic::LIFEBUOY).size(20.0).color(BLUE));
+                title(ui, "¿Algo salió mal?");
+            });
+            ui.add(Label::new(muted("\"Revertir todo\" deja cada ajuste como estaba (también con Ctrl+Shift+R desde cualquier sección). Si la app no te deja hacerlo, abrila en modo seguro, donde solo se puede revertir:")).wrap());
+            ui.horizontal(|ui| {
+                egui::Frame::new().fill(CHIP_BG).stroke(Stroke::new(1.0_f32, LINE)).corner_radius(8).inner_margin(egui::Margin::symmetric(12, 7)).show(ui, |ui| {
+                    ui.add(Label::new(RichText::new(&safe_cmd).font(mono(12.5))).truncate());
+                });
+                if button(ui, "Copiar", Btn::Ghost).clicked() {
+                    ui.ctx().copy_text(safe_cmd.clone());
+                    self.toast("Comando copiado: pegalo en Ejecutar (Win+R)", GREEN, 4.0);
+                }
+            });
+            ui.label(RichText::new("Si ni la ventana abre: el mismo comando con --revert-all --yes revierte todo sin abrirla.").size(12.5).color(DIM));
         });
     }
 }

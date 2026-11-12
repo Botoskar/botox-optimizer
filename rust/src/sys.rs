@@ -65,6 +65,7 @@ pub fn facts(spec: &Value) -> Facts {
         reserved_ok: !s(&spec["reserved"]).is_empty(),
         amd_rdna2: is_rdna2(&gpu),
         x3d_dual: is_x3d_dual(s(&spec["cpu"]["name"]), n(&spec["cpu"]["cores"])),
+        na: Default::default(),
     }
 }
 

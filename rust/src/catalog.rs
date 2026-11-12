@@ -42,7 +42,13 @@ pub struct Tweak {
     pub reg: Vec<RegEntry>,
     pub pwr: Vec<PwrEntry>,
     pub ps: Option<Ps>,
+    /// Detalle técnico (#9): qué hace por dentro. `source`: página oficial revisada a mano (ver INFO en tweaks.js).
+    #[serde(default)]
+    pub details: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
 }
+
 
 #[derive(Deserialize, Clone)]
 pub struct Boost { pub id: String, pub name: String, pub icon: String, pub every: String, pub desc: String, pub ps: String }
@@ -76,6 +82,8 @@ pub struct Facts {
     pub amd_rdna2: bool,
     /// Ryzen X3D de doble chiplet (7900X3D, 7950X3D, 9900X3D, 9950X3D): su driver depende del estacionamiento de núcleos.
     pub x3d_dual: bool,
+    /// Tweaks que en esta PC no tienen nada que cambiar (lo dice el chequeo, no el hardware).
+    pub na: std::collections::HashSet<String>,
 }
 
 /// Evalúa una condición del catálogo. Son las funciones JS del catálogo original, portadas una por una.
@@ -114,14 +122,107 @@ pub fn why(src: &str, f: &Facts) -> String {
 }
 
 impl Tweak {
-    pub fn applies(&self, f: &Facts) -> bool { self.needs.as_deref().map_or(true, |s| cond(s, f)) }
+    /// Qué toca en Windows, en palabras, sacado del propio catálogo (#9). Los que usan PowerShell muestran su script.
+    pub fn changes(&self) -> Vec<String> {
+        let val = |v: &Value| match v {
+            Value::Null => "no existe".to_string(),
+            Value::String(s) => format!("\"{s}\""),
+            Value::Array(a) => format!("binario de {} bytes", a.len()),
+            v => v.to_string(),
+        };
+        let start = |v: &Value| match v.as_i64() { Some(2) => "Automático", Some(3) => "Manual", Some(4) => "Deshabilitado", _ => "otro" };
+        let mut out: Vec<String> = self.reg.iter().map(|e| if e.svc {
+            format!("Servicio {}: arranque {} (Windows: {})", e.p.rsplit('\\').next().unwrap_or(&e.p), start(&e.v), start(&e.def))
+        } else {
+            format!("{}\\{} = {} (Windows: {})", e.p.replacen(':', "", 1), e.n, val(&e.v), val(&e.def))
+        }).collect();
+        out.extend(self.pwr.iter().map(|x| format!("Plan de energía{}, ajuste {}: {} (Windows: {})", if self.ac { " (enchufada)" } else { "" }, x.set, x.v, x.def)));
+        if self.ps.is_some() {
+            out.push("Corre un script de PowerShell: es el que se ve abajo.".into());
+        }
+        out
+    }
+    pub fn applies(&self, f: &Facts) -> bool { !f.na.contains(&self.id) && self.needs.as_deref().map_or(true, |s| cond(s, f)) }
     pub fn recommended(&self, f: &Facts) -> bool { self.applies(f) && self.rec.as_deref().map_or(false, |s| cond(s, f)) }
     pub fn reason(&self, f: &Facts) -> String { self.why.as_deref().map(|s| why(s, f)).unwrap_or_default() }
+}
+
+/// "Optimizar para juegos": las recomendadas para esta PC que se **sabe** que están apagadas (con el estado sin leer,
+/// aplicarlas de nuevo guardaría como respaldo los valores ya cambiados). Sin debloat ni las de notebook en una PC de
+/// escritorio. Las de riesgo medio, solo si se piden.
+pub fn one_click_ids(cat: &Catalog, f: &Facts, state: &std::collections::HashMap<String, bool>, medium: bool) -> Vec<String> {
+    cat.tweaks
+        .iter()
+        .filter(|t| (t.cat != "laptop" || f.laptop) && !t.debloat && t.recommended(f) && state.get(&t.id) == Some(&false) && (t.risk == "low" || medium))
+        .map(|t| t.id.clone())
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sitios aceptados como fuente de un tweak: documentación oficial de Microsoft, de los fabricantes y de Mozilla/Cloudflare.
+    const SOURCE_HOSTS: [&str; 7] = ["learn.microsoft.com", "support.microsoft.com", "devblogs.microsoft.com", "blogs.windows.com", "nvidia.custhelp.com", "developers.cloudflare.com", "mozilla.github.io"];
+
+    /// Las fuentes se abren con el navegador: solo https y de los sitios oficiales de la lista.
+    #[test]
+    fn las_fuentes_son_https_de_sitios_oficiales() {
+        let cat = Catalog::load();
+        for t in &cat.tweaks {
+            assert!(t.details.as_deref().is_some_and(|d| !d.trim().is_empty()), "{} no tiene detalle", t.id);
+            if let Some(u) = &t.source {
+                let host = u.strip_prefix("https://").and_then(|r| r.split('/').next()).unwrap_or("");
+                assert!(SOURCE_HOSTS.contains(&host), "{}: fuente fuera de la lista: {u}", t.id);
+                assert!(!u.contains(['"', ' ', '\\']), "{}: URL rara: {u}", t.id);
+            }
+        }
+    }
+
+    #[test]
+    fn un_clic_elige_recomendadas_apagadas_de_bajo_riesgo() {
+        let c = Catalog::load();
+        let f = Facts { ram_gb: 32, gpu_vendor: "NVIDIA".into(), sys_disk_ssd: true, ..Default::default() };
+        let all_off: std::collections::HashMap<String, bool> = c.tweaks.iter().map(|t| (t.id.clone(), false)).collect();
+        let low = one_click_ids(&c, &f, &all_off, false);
+        assert!(!low.is_empty());
+        for id in &low {
+            let t = c.tweak(id).unwrap();
+            assert!(t.risk == "low" && t.recommended(&f) && !t.debloat && t.cat != "laptop", "{id}");
+        }
+        // Toda recomendada de bajo riesgo que corresponde está incluida.
+        let expected = c.tweaks.iter().filter(|t| t.risk == "low" && t.recommended(&f) && !t.debloat && t.cat != "laptop").count();
+        assert_eq!(low.len(), expected);
+        // Con riesgo medio se suman, sin perder las de bajo.
+        let with_medium = one_click_ids(&c, &f, &all_off, true);
+        assert!(with_medium.len() >= low.len() && low.iter().all(|id| with_medium.contains(id)));
+        // Estado desconocido o ya activo: no se toca.
+        assert!(one_click_ids(&c, &f, &Default::default(), true).is_empty());
+        let mut one_on = all_off.clone();
+        one_on.insert(low[0].clone(), true);
+        assert!(!one_click_ids(&c, &f, &one_on, false).contains(&low[0]));
+        // En una notebook sí entran las de su categoría.
+        let lap = Facts { laptop: true, ..f.clone() };
+        let lap_ids = one_click_ids(&c, &lap, &all_off, false);
+        assert!(c.tweaks.iter().filter(|t| t.cat == "laptop" && t.risk == "low" && t.recommended(&lap)).all(|t| lap_ids.contains(&t.id)));
+        // Lo que el chequeo marcó como "no aplica en esta PC" no se ofrece aunque figure apagado.
+        let na = Facts { na: [low[0].clone()].into(), ..f.clone() };
+        assert!(!one_click_ids(&c, &na, &all_off, true).contains(&low[0]));
+        assert!(!c.tweak(&low[0]).unwrap().applies(&na));
+    }
+
+    #[test]
+    fn que_cambia_se_lee_del_catalogo() {
+        let c = Catalog::load();
+        for t in &c.tweaks {
+            assert!(!t.changes().is_empty(), "{} no dice qué cambia", t.id);
+        }
+        let reg = |p: &str, n: &str, v: Value, def: Value, svc: bool| RegEntry { p: p.into(), n: n.into(), v, t: "DWord".into(), def, svc };
+        let mut t = c.tweaks.iter().find(|t| t.native).unwrap().clone();
+        t.pwr.clear();
+        t.reg = vec![reg("HKLM:\\SOFTWARE\\X", "Val", 1.into(), Value::Null, false), reg("HKLM:\\SYSTEM\\CurrentControlSet\\Services\\DiagTrack", "Start", 4.into(), 2.into(), true)];
+        assert_eq!(t.changes(), vec!["HKLM\\SOFTWARE\\X\\Val = 1 (Windows: no existe)", "Servicio DiagTrack: arranque Deshabilitado (Windows: Automático)"]);
+    }
 
     #[test]
     fn catalogo_completo_y_portado() {

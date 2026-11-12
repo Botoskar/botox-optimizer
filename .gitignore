@@ -13,4 +13,3 @@ node_modules/
 .env.*
 *.pem
 *.key
-.claude/
