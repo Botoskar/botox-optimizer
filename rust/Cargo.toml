@@ -8,7 +8,7 @@ description = "Optimizador de FPS y latencia para PC gamer con Windows"
 
 [dependencies]
 eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts"] }
-egui-phosphor = "0.9"
+egui-phosphor = "0.14"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico", "tiff"] }
 rfd = "0.15"
 wmi = "0.18"
