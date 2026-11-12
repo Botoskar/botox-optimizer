@@ -34,7 +34,7 @@ jobs:
           rustup default 1.99.1-x86_64-pc-windows-gnu
           rustc -vV
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
 
