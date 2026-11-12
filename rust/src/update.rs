@@ -1,5 +1,5 @@
 //! Actualización desde GitHub Releases.
-//! Las versiones se publican en un repositorio público que solo trae el .exe, así la app
+//! Las versiones se publican como Releases del repositorio público del código (solo el .exe adjunto), así la app
 //! no necesita ninguna clave. Antes de instalar se verifica el SHA256 en el mismo proceso que después ejecuta el
 //! archivo, y en release se exige una firma Authenticode válida.
 use crate::engine::{run_ps_with, Log};
@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const REPO: &str = "Botoskar/botox-optimizer-releases";
+const REPO: &str = "Botoskar/botox-optimizer";
 const ASSET: &str = "BotoxOptimizer.exe";
 /// En release no se instala nada sin firma. Las pruebas locales (debug) sí pueden probar el flujo sin firmar.
 const REQUIRE_SIGNATURE: bool = !cfg!(debug_assertions);
